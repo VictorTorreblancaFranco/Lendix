@@ -27,3 +27,17 @@ CREATE TABLE IF NOT EXISTS installments (
     due_date DATE NOT NULL, principal_due NUMERIC(14,2) NOT NULL, interest_due NUMERIC(14,2) NOT NULL, amount_due NUMERIC(14,2) NOT NULL,
     amount_paid NUMERIC(14,2) NOT NULL DEFAULT 0, status VARCHAR(20) NOT NULL DEFAULT 'PENDING', UNIQUE(loan_id,installment_number)
 );
+
+CREATE TABLE IF NOT EXISTS loan_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), loan_id UUID NOT NULL REFERENCES loans(id),
+    event_type VARCHAR(30) NOT NULL, previous_due_date DATE, new_due_date DATE, charge NUMERIC(14,2) NOT NULL DEFAULT 0,
+    notes TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS cash_movements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), movement_type VARCHAR(20) NOT NULL, amount NUMERIC(14,2) NOT NULL CHECK(amount > 0),
+    source VARCHAR(40) NOT NULL, reference_id UUID, notes TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS app_users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), username VARCHAR(80) NOT NULL UNIQUE, password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(30) NOT NULL DEFAULT 'ADMIN', active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

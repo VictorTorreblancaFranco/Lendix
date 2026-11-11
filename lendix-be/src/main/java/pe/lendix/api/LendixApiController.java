@@ -60,8 +60,27 @@ public class LendixApiController {
         BigDecimal total = r.principal().add(interest.multiply(BigDecimal.valueOf(r.termCount())));
         return db.sql("INSERT INTO loans(customer_id,principal,interest_rate,rate_period,term_count,payment_frequency,disbursement_date,first_due_date,total_due,outstanding_principal,notes) VALUES(:customer,:principal,:rate,:period,:terms,:frequency,:disbursement,:firstDue,:total,:principal,:notes) RETURNING *")
                 .bind("customer", r.customerId()).bind("principal", r.principal()).bind("rate", r.interestRate()).bind("period", r.ratePeriod()).bind("terms", r.termCount()).bind("frequency", r.paymentFrequency()).bind("disbursement", r.disbursementDate()).bind("firstDue", r.firstDueDate()).bind("total", total).bind("notes", r.notes()).fetch().one()
-                .flatMap(loan -> db.sql("INSERT INTO audit_log(action,entity_type,entity_id,details) VALUES('CREATE','LOAN',:id,:details)").bind("id", loan.get("id")).bind("details", "Préstamo creado").fetch().rowsUpdated().thenReturn(loan));
+                .flatMap(loan -> createInstallments(loan, r, interest).then(db.sql("INSERT INTO audit_log(action,entity_type,entity_id,details) VALUES('CREATE','LOAN',:id,:details)").bind("id", loan.get("id")).bind("details", "Préstamo creado").fetch().rowsUpdated()).thenReturn(loan));
     }
+
+    private Mono<Void> createInstallments(Map<String,Object> loan, LoanRequest r, BigDecimal interest) {
+        BigDecimal principalPart = r.principal().divide(BigDecimal.valueOf(r.termCount()), 2, java.math.RoundingMode.HALF_UP);
+        BigDecimal interestPart = interest.divide(BigDecimal.valueOf(r.termCount()), 2, java.math.RoundingMode.HALF_UP);
+        return Flux.range(1, r.termCount()).concatMap(n -> db.sql("INSERT INTO installments(loan_id,installment_number,due_date,principal_due,interest_due,amount_due) VALUES(:loan,:n,:due,:principal,:interest,:amount)")
+                .bind("loan", loan.get("id")).bind("n", n).bind("due", r.firstDueDate().plusDays(periodDays(r.paymentFrequency()) * (long)(n - 1))).bind("principal", principalPart).bind("interest", interestPart).bind("amount", principalPart.add(interestPart)).fetch().rowsUpdated()).then();
+    }
+    private long periodDays(String frequency) { return switch (frequency == null ? "MONTHLY" : frequency.toUpperCase()) { case "DAILY" -> 1; case "WEEKLY" -> 7; case "BIWEEKLY" -> 14; default -> 30; }; }
+
+    @GetMapping("/loans/{id}/installments")
+    public Flux<Map<String,Object>> installments(@PathVariable UUID id) { return db.sql("SELECT * FROM installments WHERE loan_id=:id ORDER BY installment_number").bind("id", id).fetch().all(); }
+
+    @PostMapping("/loans/{id}/extension")
+    public Mono<Map<String,Object>> extend(@PathVariable UUID id, @RequestBody ExtensionRequest r) { return db.sql("INSERT INTO loan_events(loan_id,event_type,previous_due_date,new_due_date,charge,notes) SELECT id,'EXTENSION',first_due_date,:newDate,:charge,:notes FROM loans WHERE id=:id RETURNING *").bind("id",id).bind("newDate",r.newDueDate()).bind("charge",r.charge()==null?BigDecimal.ZERO:r.charge()).bind("notes",r.notes()).fetch().one(); }
+
+    @GetMapping("/cash/movements")
+    public Flux<Map<String,Object>> cashMovements() { return db.sql("SELECT * FROM cash_movements ORDER BY created_at DESC").fetch().all(); }
+    @PostMapping("/cash/movements")
+    public Mono<Map<String,Object>> cashMovement(@RequestBody CashRequest r) { if(r.amount()==null||r.amount().signum()<=0)return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST,"El importe debe ser positivo")); return db.sql("INSERT INTO cash_movements(movement_type,amount,source,reference_id,notes) VALUES(:type,:amount,:source,:reference,:notes) RETURNING *").bind("type",r.movementType()).bind("amount",r.amount()).bind("source",r.source()).bind("reference",r.referenceId()).bind("notes",r.notes()).fetch().one(); }
 
     @PostMapping("/loans/{id}/payments")
     public Mono<Map<String,Object>> registerPayment(@PathVariable UUID id, @RequestBody PaymentRequest r) {
@@ -77,5 +96,7 @@ public class LendixApiController {
     public record CustomerRequest(String fullName, String dni, String phone, String email, String address, String notes) {}
     public record LoanRequest(UUID customerId, BigDecimal principal, BigDecimal interestRate, String ratePeriod, Integer termCount, String paymentFrequency, LocalDate disbursementDate, LocalDate firstDueDate, String notes) {}
     public record PaymentRequest(BigDecimal amount, LocalDate paidAt, String paymentMethod, String notes) {}
+    public record ExtensionRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
+    public record CashRequest(String movementType, BigDecimal amount, String source, UUID referenceId, String notes) {}
 }
 
