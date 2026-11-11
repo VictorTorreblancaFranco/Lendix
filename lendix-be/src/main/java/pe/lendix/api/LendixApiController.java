@@ -10,6 +10,13 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import org.springframework.http.MediaType;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
+import java.io.ByteArrayOutputStream;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -86,6 +93,14 @@ public class LendixApiController {
     @GetMapping(value="/reports/portfolio", produces="text/csv")
     public Flux<String> portfolioReport() { return db.sql("SELECT c.full_name,c.dni,l.principal,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id ORDER BY c.full_name").fetch().all().map(r -> String.format("%s,%s,%s,%s,%s",r.get("full_name"),r.get("dni"),r.get("principal"),r.get("outstanding_principal"),r.get("status"))).startWith("cliente,dni,capital,saldo_pendiente,estado\n"); }
 
+    @GetMapping(value="/loans/{id}/receipt", produces=MediaType.APPLICATION_PDF_VALUE)
+    public Mono<byte[]> receipt(@PathVariable UUID id) { return db.sql("SELECT l.id,c.full_name,c.dni,l.principal,l.total_due,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id",id).fetch().one().switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Préstamo no encontrado"))).map(this::pdf); }
+
+    @PostMapping("/notifications/whatsapp")
+    public Mono<Map<String,Object>> queueWhatsapp(@RequestBody NotificationRequest r) { var spec=db.sql("INSERT INTO notifications(channel,recipient,message,reference_id) VALUES('WHATSAPP',:recipient,:message,:reference) RETURNING *").bind("recipient",r.recipient()).bind("message",r.message()); spec=r.referenceId()==null?spec.bindNull("reference",UUID.class):spec.bind("reference",r.referenceId()); return spec.fetch().one(); }
+
+    private byte[] pdf(Map<String,Object> row) { try (var doc=new PDDocument(); var out=new ByteArrayOutputStream()) { var page=new PDPage(); doc.addPage(page); try(var cs=new PDPageContentStream(doc,page)){ cs.beginText(); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD),18); cs.newLineAtOffset(60,730); cs.showText("LENDIX - Comprobante de préstamo"); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA),12); cs.newLineAtOffset(0,-35); cs.showText("Cliente: "+row.get("full_name")); cs.newLineAtOffset(0,-22); cs.showText("DNI: "+row.get("dni")); cs.newLineAtOffset(0,-22); cs.showText("Capital: S/ "+row.get("principal")); cs.newLineAtOffset(0,-22); cs.showText("Total programado: S/ "+row.get("total_due")); cs.newLineAtOffset(0,-22); cs.showText("Saldo de capital: S/ "+row.get("outstanding_principal")); cs.newLineAtOffset(0,-22); cs.showText("Estado: "+row.get("status")); cs.endText(); } doc.save(out); return out.toByteArray(); } catch(Exception e){ throw new IllegalStateException("No se pudo generar el comprobante",e); } }
+
     @PostMapping("/loans/{id}/extension")
     public Mono<Map<String,Object>> extend(@PathVariable UUID id, @RequestBody ExtensionRequest r) { return db.sql("INSERT INTO loan_events(loan_id,event_type,previous_due_date,new_due_date,charge,notes) SELECT id,'EXTENSION',first_due_date,:newDate,:charge,:notes FROM loans WHERE id=:id RETURNING *").bind("id",id).bind("newDate",r.newDueDate()).bind("charge",r.charge()==null?BigDecimal.ZERO:r.charge()).bind("notes",r.notes()).fetch().one(); }
 
@@ -111,5 +126,6 @@ public class LendixApiController {
     public record ExtensionRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
     public record RenewalRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
     public record CashRequest(String movementType, BigDecimal amount, String source, UUID referenceId, String notes) {}
+    public record NotificationRequest(String recipient, String message, UUID referenceId) {}
 }
 
