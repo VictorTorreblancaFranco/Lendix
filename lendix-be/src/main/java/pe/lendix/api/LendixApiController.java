@@ -17,12 +17,14 @@ import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
 import java.io.ByteArrayOutputStream;
+import pe.lendix.notifications.WhatsAppNotificationService;
 
 @RestController
 @RequestMapping("/api/v1")
 public class LendixApiController {
     private final DatabaseClient db;
-    public LendixApiController(DatabaseClient db) { this.db = db; }
+    private final WhatsAppNotificationService whatsapp;
+    public LendixApiController(DatabaseClient db, WhatsAppNotificationService whatsapp) { this.db = db; this.whatsapp = whatsapp; }
 
     @GetMapping("/customers")
     public Flux<Map<String,Object>> customers(@RequestParam(defaultValue = "") String q) {
@@ -98,6 +100,9 @@ public class LendixApiController {
 
     @PostMapping("/notifications/whatsapp")
     public Mono<Map<String,Object>> queueWhatsapp(@RequestBody NotificationRequest r) { var spec=db.sql("INSERT INTO notifications(channel,recipient,message,reference_id) VALUES('WHATSAPP',:recipient,:message,:reference) RETURNING *").bind("recipient",r.recipient()).bind("message",r.message()); spec=r.referenceId()==null?spec.bindNull("reference",UUID.class):spec.bind("reference",r.referenceId()); return spec.fetch().one(); }
+
+    @PostMapping("/notifications/whatsapp/{id}/send")
+    public Mono<Map<String,Object>> sendWhatsapp(@PathVariable UUID id) { return db.sql("SELECT id,recipient,message FROM notifications WHERE id=:id").bind("id",id).fetch().one().switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Notificación no encontrada"))).flatMap(n -> whatsapp.send(id,(String)n.get("recipient"),(String)n.get("message"))); }
 
     private byte[] pdf(Map<String,Object> row) { try (var doc=new PDDocument(); var out=new ByteArrayOutputStream()) { var page=new PDPage(); doc.addPage(page); try(var cs=new PDPageContentStream(doc,page)){ cs.beginText(); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD),18); cs.newLineAtOffset(60,730); cs.showText("LENDIX - Comprobante de préstamo"); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA),12); cs.newLineAtOffset(0,-35); cs.showText("Cliente: "+row.get("full_name")); cs.newLineAtOffset(0,-22); cs.showText("DNI: "+row.get("dni")); cs.newLineAtOffset(0,-22); cs.showText("Capital: S/ "+row.get("principal")); cs.newLineAtOffset(0,-22); cs.showText("Total programado: S/ "+row.get("total_due")); cs.newLineAtOffset(0,-22); cs.showText("Saldo de capital: S/ "+row.get("outstanding_principal")); cs.newLineAtOffset(0,-22); cs.showText("Estado: "+row.get("status")); cs.endText(); } doc.save(out); return out.toByteArray(); } catch(Exception e){ throw new IllegalStateException("No se pudo generar el comprobante",e); } }
 
