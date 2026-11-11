@@ -1,13 +1,21 @@
 services:
-  postgres:
-    image: postgres:18-alpine
+  backend:
+    build: ./lendix-be
     environment:
-      POSTGRES_DB: lendix
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
-    volumes:
-      - lendix-postgres:/var/lib/postgresql/data
-volumes:
-  lendix-postgres:
+      LENDIX_AUTH_REQUIRED: "false"
+      LENDIX_ADMIN_USERNAME: ${LENDIX_ADMIN_USERNAME:-admin}
+      LENDIX_ADMIN_PASSWORD: ${LENDIX_ADMIN_PASSWORD:-Admin123@}
+      SERVER_PORT: 18080
+      DB_URL: ${DB_URL}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      FLYWAY_URL: ${FLYWAY_URL}
+      FLYWAY_USER: ${FLYWAY_USER}
+      FLYWAY_PASSWORD: ${FLYWAY_PASSWORD}
+    ports: ["18080:18080"]
+    restart: unless-stopped
+  frontend:
+    build: ./lendix-fe
+    depends_on: [backend]
+    ports: ["4200:80"]
+    restart: unless-stopped
