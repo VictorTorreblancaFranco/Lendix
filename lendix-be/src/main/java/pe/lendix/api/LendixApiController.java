@@ -72,7 +72,8 @@ public class LendixApiController {
         String frequency = r.paymentFrequency() == null ? "MONTHLY" : r.paymentFrequency();
         LocalDate disbursement = r.disbursementDate() == null ? LocalDate.now() : r.disbursementDate();
         if (r.firstDueDate() == null) return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Indica la primera fecha de pago"));
-        BigDecimal interest = r.principal().multiply(r.interestRate()).multiply(BigDecimal.valueOf(periodDays(frequency))).divide(BigDecimal.valueOf(3000), 2, java.math.RoundingMode.HALF_UP);
+        BigDecimal periodFactor = switch (frequency.toUpperCase()) { case "WEEKLY" -> BigDecimal.valueOf(0.25); case "BIWEEKLY" -> BigDecimal.valueOf(0.5); case "DAILY" -> BigDecimal.valueOf(1).divide(BigDecimal.valueOf(30), 6, java.math.RoundingMode.HALF_UP); default -> BigDecimal.ONE; };
+        BigDecimal interest = r.principal().multiply(r.interestRate()).divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP).multiply(periodFactor).setScale(2, java.math.RoundingMode.HALF_UP);
         BigDecimal total = r.principal().add(interest.multiply(BigDecimal.valueOf(r.termCount())));
         return db.sql("INSERT INTO loans(customer_id,principal,interest_rate,rate_period,term_count,payment_frequency,disbursement_date,first_due_date,total_due,outstanding_principal,notes) VALUES(:customer,:principal,:rate,:period,:terms,:frequency,:disbursement,:firstDue,:total,:principal,:notes) RETURNING *")
                 .bind("customer", r.customerId()).bind("principal", r.principal()).bind("rate", r.interestRate()).bind("period", ratePeriod).bind("terms", r.termCount()).bind("frequency", frequency).bind("disbursement", disbursement).bind("firstDue", r.firstDueDate()).bind("total", total).bind("notes", r.notes() == null ? "" : r.notes()).fetch().one()
