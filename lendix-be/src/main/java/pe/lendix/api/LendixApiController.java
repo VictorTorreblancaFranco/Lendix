@@ -137,7 +137,7 @@ public class LendixApiController {
 
     @PostMapping("/loans/{id}/payments")
     public Mono<Map<String,Object>> registerPayment(@PathVariable UUID id, @RequestBody PaymentRequest r) {
-        if (r.amount() == null || r.amount().signum() <= 0) return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "El pago debe ser positivo"));
+        if (r.amount() == null || r.amount().signum() <= 0 || r.amount().stripTrailingZeros().scale() > 0) return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "El pago debe ser un monto entero positivo"));
         return db.sql("SELECT id,outstanding_principal,interest_rate FROM loans WHERE id=:id FOR UPDATE").bind("id", id).fetch().one()
                 .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Préstamo no encontrado")))
                 .flatMap(loan -> { BigDecimal principal = (BigDecimal) loan.get("outstanding_principal"); BigDecimal rate = (BigDecimal) loan.get("interest_rate"); BigDecimal interestDue = principal.multiply(rate).divide(BigDecimal.valueOf(100)); BigDecimal interestPaid = r.amount().min(interestDue); BigDecimal principalPaid = r.amount().subtract(interestPaid).min(principal); BigDecimal newPrincipal = principal.subtract(principalPaid); return db.sql("INSERT INTO payments(loan_id,paid_at,amount,principal_paid,interest_paid,payment_method,notes) VALUES(:loan,:paidAt,:amount,:principalPaid,:interestPaid,:method,:notes) RETURNING *").bind("loan",id).bind("paidAt",r.paidAt()==null?LocalDate.now():r.paidAt()).bind("amount",r.amount()).bind("principalPaid",principalPaid).bind("interestPaid",interestPaid).bind("method",r.paymentMethod()).bind("notes",r.notes()==null?"":r.notes()).fetch().one().flatMap(payment -> db.sql("UPDATE loans SET outstanding_principal=:principal,status=CASE WHEN :principal=0 THEN 'PAID' ELSE 'ACTIVE' END, updated_at=now() WHERE id=:id").bind("principal",newPrincipal).bind("id",id).fetch().rowsUpdated().then(paymentInstallment(payment, r)).thenReturn(payment)); });
@@ -145,8 +145,7 @@ public class LendixApiController {
 
     private Mono<Void> paymentInstallment(Map<String,Object> payment, PaymentRequest r) {
         if (r.installmentId() == null) return Mono.empty();
-        return db.sql("UPDATE installments SET amount_paid=amount_paid+:amount,status=CASE WHEN amount_paid+:amount>=amount_due THEN 'PAID' ELSE 'PARTIAL' END WHERE id=:installment")
-                .bind("amount", r.amount()).bind("installment", r.installmentId()).fetch().rowsUpdated().then();
+        return db.sql("SELECT amount_due,amount_paid,installment_number FROM installments WHERE id=:installment").bind("installment", r.installmentId()).fetch().one().flatMap(i -> { BigDecimal due=(BigDecimal)i.get("amount_due"), paid=(BigDecimal)i.get("amount_paid"); BigDecimal remaining=r.amount().subtract(due.subtract(paid)).max(BigDecimal.ZERO); return db.sql("UPDATE installments SET amount_paid=amount_due,status='PAID' WHERE id=:installment").bind("installment",r.installmentId()).fetch().rowsUpdated().then(remaining.signum()>0 ? db.sql("UPDATE installments SET amount_paid=LEAST(amount_due,amount_paid+:extra),status=CASE WHEN amount_paid+:extra>=amount_due THEN 'PAID' ELSE status END WHERE loan_id=(SELECT loan_id FROM installments WHERE id=:installment) AND installment_number=(SELECT installment_number+1 FROM installments WHERE id=:installment)").bind("extra",remaining).bind("installment",r.installmentId()).fetch().rowsUpdated().then() : Mono.empty()); });
     }
 
     @GetMapping("/dashboard")
