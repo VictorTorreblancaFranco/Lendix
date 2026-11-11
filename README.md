@@ -13,5 +13,7 @@ Plataforma privada para gestionar préstamos personales en Perú (PEN, zona hora
 2. Ejecutar las migraciones y el backend con Maven.
 3. En otra terminal, ejecutar `npm install` y `npm start` dentro de `lendix-fe`.
 
+El backend exige `LENDIX_ADMIN_USERNAME` y `LENDIX_ADMIN_PASSWORD`; las rutas de negocio se consumen con autenticación HTTP Basic durante esta primera versión. El endpoint `/api/v1/health` queda público para comprobaciones.
+
 La conexión de Neon nunca se guarda en el repositorio. Si la URL compartida contiene una contraseña real, debe rotarse en Neon antes de usarla en un entorno compartido.
 
