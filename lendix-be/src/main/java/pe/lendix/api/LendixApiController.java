@@ -96,6 +96,9 @@ public class LendixApiController {
     @GetMapping("/loans/{id}/early-settlement")
     public Mono<Map<String,Object>> earlySettlement(@PathVariable UUID id) { return db.sql("SELECT id,outstanding_principal,interest_rate FROM loans WHERE id=:id").bind("id",id).fetch().one().map(l -> { BigDecimal principal=(BigDecimal)l.get("outstanding_principal"); BigDecimal rate=(BigDecimal)l.get("interest_rate"); BigDecimal interest=principal.multiply(rate).divide(BigDecimal.valueOf(100)); return Map.of("loanId",id,"principal",principal,"estimatedInterest",interest,"estimatedTotal",principal.add(interest)); }); }
 
+    @PostMapping("/loans/{id}/early-settlement")
+    public Mono<Map<String,Object>> settleLoan(@PathVariable UUID id) { return db.sql("UPDATE loans SET outstanding_principal=0,status='PAID',updated_at=now() WHERE id=:id AND status IN ('ACTIVE','OVERDUE') RETURNING id,status,outstanding_principal").bind("id",id).fetch().one().switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"El préstamo ya está cerrado o no existe"))); }
+
     @PostMapping("/loans/{id}/renew")
     public Mono<Map<String,Object>> renew(@PathVariable UUID id, @RequestBody RenewalRequest r) { return db.sql("INSERT INTO loan_events(loan_id,event_type,previous_due_date,new_due_date,charge,notes) SELECT id,'RENEWAL',first_due_date,:newDate,:charge,:notes FROM loans WHERE id=:id RETURNING *").bind("id",id).bind("newDate",r.newDueDate()).bind("charge",r.charge()==null?BigDecimal.ZERO:r.charge()).bind("notes",r.notes()).fetch().one().flatMap(event -> db.sql("UPDATE loans SET status='ACTIVE', first_due_date=:newDate, updated_at=now() WHERE id=:id").bind("id",id).bind("newDate",r.newDueDate()).fetch().rowsUpdated().thenReturn(event)); }
 
