@@ -90,6 +90,9 @@ public class LendixApiController {
     @GetMapping("/loans/{id}/installments")
     public Flux<Map<String,Object>> installments(@PathVariable UUID id) { return db.sql("SELECT * FROM installments WHERE loan_id=:id ORDER BY installment_number").bind("id", id).fetch().all(); }
 
+    @GetMapping("/loans/{id}/payments")
+    public Flux<Map<String,Object>> payments(@PathVariable UUID id) { return db.sql("SELECT * FROM payments WHERE loan_id=:id ORDER BY paid_at DESC, created_at DESC").bind("id", id).fetch().all(); }
+
     @GetMapping("/loans/{id}/early-settlement")
     public Mono<Map<String,Object>> earlySettlement(@PathVariable UUID id) { return db.sql("SELECT id,outstanding_principal,interest_rate FROM loans WHERE id=:id").bind("id",id).fetch().one().map(l -> { BigDecimal principal=(BigDecimal)l.get("outstanding_principal"); BigDecimal rate=(BigDecimal)l.get("interest_rate"); BigDecimal interest=principal.multiply(rate).divide(BigDecimal.valueOf(100)); return Map.of("loanId",id,"principal",principal,"estimatedInterest",interest,"estimatedTotal",principal.add(interest)); }); }
 
