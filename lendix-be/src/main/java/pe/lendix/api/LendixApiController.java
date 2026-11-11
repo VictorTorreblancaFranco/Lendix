@@ -68,10 +68,14 @@ public class LendixApiController {
     public Mono<Map<String,Object>> createLoan(@RequestBody LoanRequest r) {
         if (r.customerId() == null || r.principal() == null || r.principal().signum() <= 0 || r.interestRate() == null || r.termCount() == null || r.termCount() < 1 || r.termCount() > 365)
             return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Condiciones del préstamo inválidas"));
+        String ratePeriod = r.ratePeriod() == null ? "MONTHLY" : r.ratePeriod();
+        String frequency = r.paymentFrequency() == null ? "MONTHLY" : r.paymentFrequency();
+        LocalDate disbursement = r.disbursementDate() == null ? LocalDate.now() : r.disbursementDate();
+        if (r.firstDueDate() == null) return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Indica la primera fecha de pago"));
         BigDecimal interest = r.principal().multiply(r.interestRate()).divide(BigDecimal.valueOf(100));
         BigDecimal total = r.principal().add(interest.multiply(BigDecimal.valueOf(r.termCount())));
         return db.sql("INSERT INTO loans(customer_id,principal,interest_rate,rate_period,term_count,payment_frequency,disbursement_date,first_due_date,total_due,outstanding_principal,notes) VALUES(:customer,:principal,:rate,:period,:terms,:frequency,:disbursement,:firstDue,:total,:principal,:notes) RETURNING *")
-                .bind("customer", r.customerId()).bind("principal", r.principal()).bind("rate", r.interestRate()).bind("period", r.ratePeriod()).bind("terms", r.termCount()).bind("frequency", r.paymentFrequency()).bind("disbursement", r.disbursementDate()).bind("firstDue", r.firstDueDate()).bind("total", total).bind("notes", r.notes()).fetch().one()
+                .bind("customer", r.customerId()).bind("principal", r.principal()).bind("rate", r.interestRate()).bind("period", ratePeriod).bind("terms", r.termCount()).bind("frequency", frequency).bind("disbursement", disbursement).bind("firstDue", r.firstDueDate()).bind("total", total).bind("notes", r.notes() == null ? "" : r.notes()).fetch().one()
                 .flatMap(loan -> createInstallments(loan, r, interest).then(db.sql("INSERT INTO audit_log(action,entity_type,entity_id,details) VALUES('CREATE','LOAN',:id,:details)").bind("id", loan.get("id")).bind("details", "Préstamo creado").fetch().rowsUpdated()).thenReturn(loan));
     }
 
@@ -98,6 +102,12 @@ public class LendixApiController {
     @GetMapping(value="/loans/{id}/receipt", produces=MediaType.APPLICATION_PDF_VALUE)
     public Mono<byte[]> receipt(@PathVariable UUID id) { return db.sql("SELECT l.id,c.full_name,c.dni,l.principal,l.total_due,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id",id).fetch().one().switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Préstamo no encontrado"))).map(this::pdf); }
 
+    @GetMapping(value="/reports/portfolio.pdf", produces=MediaType.APPLICATION_PDF_VALUE)
+    public Mono<byte[]> portfolioPdf() { return db.sql("SELECT c.full_name,c.dni,l.principal,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id ORDER BY c.full_name").fetch().all().collectList().map(this::portfolioPdfBytes); }
+
+    @GetMapping(value="/payments/{id}/receipt", produces=MediaType.APPLICATION_PDF_VALUE)
+    public Mono<byte[]> paymentReceipt(@PathVariable UUID id) { return db.sql("SELECT p.id,p.amount,p.paid_at,p.payment_method,c.full_name,c.dni,l.id AS loan_id FROM payments p JOIN loans l ON l.id=p.loan_id JOIN customers c ON c.id=l.customer_id WHERE p.id=:id").bind("id", id).fetch().one().switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Pago no encontrado"))).map(this::paymentPdf); }
+
     @PostMapping("/notifications/whatsapp")
     public Mono<Map<String,Object>> queueWhatsapp(@RequestBody NotificationRequest r) { var spec=db.sql("INSERT INTO notifications(channel,recipient,message,reference_id) VALUES('WHATSAPP',:recipient,:message,:reference) RETURNING *").bind("recipient",r.recipient()).bind("message",r.message()); spec=r.referenceId()==null?spec.bindNull("reference",UUID.class):spec.bind("reference",r.referenceId()); return spec.fetch().one(); }
 
@@ -105,6 +115,10 @@ public class LendixApiController {
     public Mono<Map<String,Object>> sendWhatsapp(@PathVariable UUID id) { return db.sql("SELECT id,recipient,message FROM notifications WHERE id=:id").bind("id",id).fetch().one().switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Notificación no encontrada"))).flatMap(n -> whatsapp.send(id,(String)n.get("recipient"),(String)n.get("message"))); }
 
     private byte[] pdf(Map<String,Object> row) { try (var doc=new PDDocument(); var out=new ByteArrayOutputStream()) { var page=new PDPage(); doc.addPage(page); try(var cs=new PDPageContentStream(doc,page)){ cs.beginText(); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD),18); cs.newLineAtOffset(60,730); cs.showText("LENDIX - Comprobante de préstamo"); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA),12); cs.newLineAtOffset(0,-35); cs.showText("Cliente: "+row.get("full_name")); cs.newLineAtOffset(0,-22); cs.showText("DNI: "+row.get("dni")); cs.newLineAtOffset(0,-22); cs.showText("Capital: S/ "+row.get("principal")); cs.newLineAtOffset(0,-22); cs.showText("Total programado: S/ "+row.get("total_due")); cs.newLineAtOffset(0,-22); cs.showText("Saldo de capital: S/ "+row.get("outstanding_principal")); cs.newLineAtOffset(0,-22); cs.showText("Estado: "+row.get("status")); cs.endText(); } doc.save(out); return out.toByteArray(); } catch(Exception e){ throw new IllegalStateException("No se pudo generar el comprobante",e); } }
+
+    private byte[] paymentPdf(Map<String,Object> row) { return simplePdf("LENDIX - Voucher de pago", "Cliente: "+row.get("full_name"), "DNI: "+row.get("dni"), "Importe: S/ "+row.get("amount"), "Fecha: "+row.get("paid_at"), "Método: "+row.get("payment_method")); }
+    private byte[] portfolioPdfBytes(java.util.List<Map<String,Object>> rows) { var lines = new java.util.ArrayList<String>(); lines.add("Reporte de cartera"); lines.add("Registros: "+rows.size()); rows.forEach(r -> lines.add(r.get("full_name")+" | S/ "+r.get("principal")+" | Saldo S/ "+r.get("outstanding_principal")+" | "+r.get("status"))); return simplePdf(lines.toArray(String[]::new)); }
+    private byte[] simplePdf(String... lines) { try (var doc=new PDDocument(); var out=new ByteArrayOutputStream()) { var page=new PDPage(); doc.addPage(page); try(var cs=new PDPageContentStream(doc,page)){ cs.beginText(); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD),18); cs.newLineAtOffset(60,730); cs.showText(lines[0]); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA),11); for(int i=1;i<lines.length;i++){ cs.newLineAtOffset(0,-24); cs.showText(lines[i].replaceAll("[^\\x20-\\x7E]", " ")); } cs.endText(); } doc.save(out); return out.toByteArray(); } catch(Exception e){ throw new IllegalStateException("No se pudo generar el PDF",e); } }
 
     @PostMapping("/loans/{id}/extension")
     public Mono<Map<String,Object>> extend(@PathVariable UUID id, @RequestBody ExtensionRequest r) { return db.sql("INSERT INTO loan_events(loan_id,event_type,previous_due_date,new_due_date,charge,notes) SELECT id,'EXTENSION',first_due_date,:newDate,:charge,:notes FROM loans WHERE id=:id RETURNING *").bind("id",id).bind("newDate",r.newDueDate()).bind("charge",r.charge()==null?BigDecimal.ZERO:r.charge()).bind("notes",r.notes()).fetch().one(); }
