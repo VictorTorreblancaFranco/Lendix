@@ -72,7 +72,7 @@ public class LendixApiController {
         String frequency = r.paymentFrequency() == null ? "MONTHLY" : r.paymentFrequency();
         LocalDate disbursement = r.disbursementDate() == null ? LocalDate.now() : r.disbursementDate();
         if (r.firstDueDate() == null) return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Indica la primera fecha de pago"));
-        BigDecimal interest = r.principal().multiply(r.interestRate()).divide(BigDecimal.valueOf(100));
+        BigDecimal interest = r.principal().multiply(r.interestRate()).multiply(BigDecimal.valueOf(periodDays(frequency))).divide(BigDecimal.valueOf(3000), 2, java.math.RoundingMode.HALF_UP);
         BigDecimal total = r.principal().add(interest.multiply(BigDecimal.valueOf(r.termCount())));
         return db.sql("INSERT INTO loans(customer_id,principal,interest_rate,rate_period,term_count,payment_frequency,disbursement_date,first_due_date,total_due,outstanding_principal,notes) VALUES(:customer,:principal,:rate,:period,:terms,:frequency,:disbursement,:firstDue,:total,:principal,:notes) RETURNING *")
                 .bind("customer", r.customerId()).bind("principal", r.principal()).bind("rate", r.interestRate()).bind("period", ratePeriod).bind("terms", r.termCount()).bind("frequency", frequency).bind("disbursement", disbursement).bind("firstDue", r.firstDueDate()).bind("total", total).bind("notes", r.notes() == null ? "" : r.notes()).fetch().one()
@@ -81,7 +81,7 @@ public class LendixApiController {
 
     private Mono<Void> createInstallments(Map<String,Object> loan, LoanRequest r, BigDecimal interest) {
         BigDecimal principalPart = r.principal().divide(BigDecimal.valueOf(r.termCount()), 2, java.math.RoundingMode.HALF_UP);
-        BigDecimal interestPart = interest.divide(BigDecimal.valueOf(r.termCount()), 2, java.math.RoundingMode.HALF_UP);
+        BigDecimal interestPart = interest;
         return Flux.range(1, r.termCount()).concatMap(n -> db.sql("INSERT INTO installments(loan_id,installment_number,due_date,principal_due,interest_due,amount_due) VALUES(:loan,:n,:due,:principal,:interest,:amount)")
                 .bind("loan", loan.get("id")).bind("n", n).bind("due", r.firstDueDate().plusDays(periodDays(r.paymentFrequency()) * (long)(n - 1))).bind("principal", principalPart).bind("interest", interestPart).bind("amount", principalPart.add(interestPart)).fetch().rowsUpdated()).then();
     }
@@ -136,7 +136,13 @@ public class LendixApiController {
         if (r.amount() == null || r.amount().signum() <= 0) return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "El pago debe ser positivo"));
         return db.sql("SELECT id,outstanding_principal,interest_rate FROM loans WHERE id=:id FOR UPDATE").bind("id", id).fetch().one()
                 .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Préstamo no encontrado")))
-                .flatMap(loan -> { BigDecimal principal = (BigDecimal) loan.get("outstanding_principal"); BigDecimal rate = (BigDecimal) loan.get("interest_rate"); BigDecimal interestDue = principal.multiply(rate).divide(BigDecimal.valueOf(100)); BigDecimal interestPaid = r.amount().min(interestDue); BigDecimal principalPaid = r.amount().subtract(interestPaid).min(principal); BigDecimal newPrincipal = principal.subtract(principalPaid); return db.sql("INSERT INTO payments(loan_id,paid_at,amount,principal_paid,interest_paid,payment_method,notes) VALUES(:loan,:paidAt,:amount,:principalPaid,:interestPaid,:method,:notes) RETURNING *").bind("loan",id).bind("paidAt",r.paidAt()==null?LocalDate.now():r.paidAt()).bind("amount",r.amount()).bind("principalPaid",principalPaid).bind("interestPaid",interestPaid).bind("method",r.paymentMethod()).bind("notes",r.notes()).fetch().one().flatMap(payment -> db.sql("UPDATE loans SET outstanding_principal=:principal,status=CASE WHEN :principal=0 THEN 'PAID' ELSE 'ACTIVE' END, updated_at=now() WHERE id=:id").bind("principal",newPrincipal).bind("id",id).fetch().rowsUpdated().thenReturn(payment)); });
+                .flatMap(loan -> { BigDecimal principal = (BigDecimal) loan.get("outstanding_principal"); BigDecimal rate = (BigDecimal) loan.get("interest_rate"); BigDecimal interestDue = principal.multiply(rate).divide(BigDecimal.valueOf(100)); BigDecimal interestPaid = r.amount().min(interestDue); BigDecimal principalPaid = r.amount().subtract(interestPaid).min(principal); BigDecimal newPrincipal = principal.subtract(principalPaid); return db.sql("INSERT INTO payments(loan_id,paid_at,amount,principal_paid,interest_paid,payment_method,notes) VALUES(:loan,:paidAt,:amount,:principalPaid,:interestPaid,:method,:notes) RETURNING *").bind("loan",id).bind("paidAt",r.paidAt()==null?LocalDate.now():r.paidAt()).bind("amount",r.amount()).bind("principalPaid",principalPaid).bind("interestPaid",interestPaid).bind("method",r.paymentMethod()).bind("notes",r.notes()).fetch().one().flatMap(payment -> db.sql("UPDATE loans SET outstanding_principal=:principal,status=CASE WHEN :principal=0 THEN 'PAID' ELSE 'ACTIVE' END, updated_at=now() WHERE id=:id").bind("principal",newPrincipal).bind("id",id).fetch().rowsUpdated().then(paymentInstallment(payment, r)).thenReturn(payment)); });
+    }
+
+    private Mono<Void> paymentInstallment(Map<String,Object> payment, PaymentRequest r) {
+        if (r.installmentId() == null) return Mono.empty();
+        return db.sql("UPDATE installments SET amount_paid=amount_paid+:amount,status=CASE WHEN amount_paid+:amount>=amount_due THEN 'PAID' ELSE 'PARTIAL' END WHERE id=:installment")
+                .bind("amount", r.amount()).bind("installment", r.installmentId()).fetch().rowsUpdated().then();
     }
 
     @GetMapping("/dashboard")
@@ -144,7 +150,7 @@ public class LendixApiController {
 
     public record CustomerRequest(String fullName, String dni, String phone, String email, String address, String notes) {}
     public record LoanRequest(UUID customerId, BigDecimal principal, BigDecimal interestRate, String ratePeriod, Integer termCount, String paymentFrequency, LocalDate disbursementDate, LocalDate firstDueDate, String notes) {}
-    public record PaymentRequest(BigDecimal amount, LocalDate paidAt, String paymentMethod, String notes) {}
+    public record PaymentRequest(BigDecimal amount, LocalDate paidAt, String paymentMethod, String notes, UUID installmentId) {}
     public record ExtensionRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
     public record RenewalRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
     public record CashRequest(String movementType, BigDecimal amount, String source, UUID referenceId, String notes) {}
