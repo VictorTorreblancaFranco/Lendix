@@ -28,9 +28,12 @@ public class LendixApiController {
     public Mono<Map<String,Object>> createCustomer(@RequestBody CustomerRequest request) {
         if (request.fullName() == null || request.fullName().isBlank() || request.dni() == null || !request.dni().matches("\\d{8}") || request.phone() == null || request.phone().isBlank())
             return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Nombre, DNI válido y teléfono son obligatorios"));
-        return db.sql("INSERT INTO customers(full_name,dni,phone,email,address,notes) VALUES(:name,:dni,:phone,:email,:address,:notes) RETURNING id,full_name,dni,phone,email,active")
-                .bind("name", request.fullName().trim()).bind("dni", request.dni()).bind("phone", request.phone().trim())
-                .bind("email", request.email()).bind("address", request.address()).bind("notes", request.notes()).fetch().one();
+        var spec = db.sql("INSERT INTO customers(full_name,dni,phone,email,address,notes) VALUES(:name,:dni,:phone,:email,:address,:notes) RETURNING id,full_name,dni,phone,email,active")
+                .bind("name", request.fullName().trim()).bind("dni", request.dni()).bind("phone", request.phone().trim());
+        spec = request.email() == null ? spec.bindNull("email", String.class) : spec.bind("email", request.email());
+        spec = request.address() == null ? spec.bindNull("address", String.class) : spec.bind("address", request.address());
+        spec = request.notes() == null ? spec.bindNull("notes", String.class) : spec.bind("notes", request.notes());
+        return spec.fetch().one();
     }
 
     @PutMapping("/customers/{id}")
