@@ -74,6 +74,15 @@ public class LendixApiController {
     @GetMapping("/loans/{id}/installments")
     public Flux<Map<String,Object>> installments(@PathVariable UUID id) { return db.sql("SELECT * FROM installments WHERE loan_id=:id ORDER BY installment_number").bind("id", id).fetch().all(); }
 
+    @GetMapping("/loans/{id}/early-settlement")
+    public Mono<Map<String,Object>> earlySettlement(@PathVariable UUID id) { return db.sql("SELECT id,outstanding_principal,interest_rate FROM loans WHERE id=:id").bind("id",id).fetch().one().map(l -> { BigDecimal principal=(BigDecimal)l.get("outstanding_principal"); BigDecimal rate=(BigDecimal)l.get("interest_rate"); BigDecimal interest=principal.multiply(rate).divide(BigDecimal.valueOf(100)); return Map.of("loanId",id,"principal",principal,"estimatedInterest",interest,"estimatedTotal",principal.add(interest)); }); }
+
+    @PostMapping("/loans/{id}/renew")
+    public Mono<Map<String,Object>> renew(@PathVariable UUID id, @RequestBody RenewalRequest r) { return db.sql("INSERT INTO loan_events(loan_id,event_type,previous_due_date,new_due_date,charge,notes) SELECT id,'RENEWAL',first_due_date,:newDate,:charge,:notes FROM loans WHERE id=:id RETURNING *").bind("id",id).bind("newDate",r.newDueDate()).bind("charge",r.charge()==null?BigDecimal.ZERO:r.charge()).bind("notes",r.notes()).fetch().one().flatMap(event -> db.sql("UPDATE loans SET status='ACTIVE', first_due_date=:newDate, updated_at=now() WHERE id=:id").bind("id",id).bind("newDate",r.newDueDate()).fetch().rowsUpdated().thenReturn(event)); }
+
+    @GetMapping(value="/reports/portfolio", produces="text/csv")
+    public Flux<String> portfolioReport() { return db.sql("SELECT c.full_name,c.dni,l.principal,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id ORDER BY c.full_name").fetch().all().map(r -> String.format("%s,%s,%s,%s,%s",r.get("full_name"),r.get("dni"),r.get("principal"),r.get("outstanding_principal"),r.get("status"))).startWith("cliente,dni,capital,saldo_pendiente,estado\n"); }
+
     @PostMapping("/loans/{id}/extension")
     public Mono<Map<String,Object>> extend(@PathVariable UUID id, @RequestBody ExtensionRequest r) { return db.sql("INSERT INTO loan_events(loan_id,event_type,previous_due_date,new_due_date,charge,notes) SELECT id,'EXTENSION',first_due_date,:newDate,:charge,:notes FROM loans WHERE id=:id RETURNING *").bind("id",id).bind("newDate",r.newDueDate()).bind("charge",r.charge()==null?BigDecimal.ZERO:r.charge()).bind("notes",r.notes()).fetch().one(); }
 
@@ -97,6 +106,7 @@ public class LendixApiController {
     public record LoanRequest(UUID customerId, BigDecimal principal, BigDecimal interestRate, String ratePeriod, Integer termCount, String paymentFrequency, LocalDate disbursementDate, LocalDate firstDueDate, String notes) {}
     public record PaymentRequest(BigDecimal amount, LocalDate paidAt, String paymentMethod, String notes) {}
     public record ExtensionRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
+    public record RenewalRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
     public record CashRequest(String movementType, BigDecimal amount, String source, UUID referenceId, String notes) {}
 }
 
