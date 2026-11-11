@@ -16,9 +16,12 @@ import org.springframework.beans.factory.annotation.Value;
 @EnableWebFluxSecurity
 public class SecurityConfig {
     @Bean
-    SecurityWebFilterChain securityWebFilterChain(ServerHttpSecurity http) {
+    SecurityWebFilterChain securityWebFilterChain(ServerHttpSecurity http, @Value("${LENDIX_AUTH_REQUIRED:true}") boolean authRequired) {
         return http.csrf(ServerHttpSecurity.CsrfSpec::disable)
-                .authorizeExchange(exchanges -> exchanges.pathMatchers("/api/v1/health", "/actuator/health").permitAll().anyExchange().authenticated())
+                .authorizeExchange(exchanges -> {
+                    if (authRequired) exchanges.pathMatchers("/api/v1/health", "/actuator/health").permitAll().anyExchange().authenticated();
+                    else exchanges.anyExchange().permitAll();
+                })
                 .httpBasic(basic -> {})
                 .build();
     }
