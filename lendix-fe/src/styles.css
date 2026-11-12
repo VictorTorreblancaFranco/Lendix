@@ -16,3 +16,4 @@ button{transition:transform .14s ease,filter .14s ease,box-shadow .14s ease}butt
 .modal-backdrop .table .row.head{padding-right:8px}
 @media(max-width:800px){.modal-backdrop .table .row{grid-template-columns:.4fr 1fr 1fr 1.3fr}.modal-backdrop .table .row.head span:last-child{display:none}}
 .report-button{text-decoration:none;display:inline-flex;align-items:center}.history-table .row{grid-template-columns:1.6fr 1fr 1fr 1fr}.paid-status{background:#eeeaff;color:#6046cf}.history-table .row:not(.head){cursor:pointer}.history-table .row:not(.head):hover{background:#faf9ff}
+.detail-actions{display:flex;align-items:center;gap:10px;margin-left:auto}.cancel-button{border:1px solid #f4b9bd!important;background:#fff5f5!important;color:#c64553!important}.detail-head>button{margin-left:10px}.detail-head{gap:10px}.detail-head>div:first-child{flex:1}.history-table .status{font-weight:700}
