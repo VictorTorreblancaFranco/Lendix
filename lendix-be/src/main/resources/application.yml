@@ -10,6 +10,10 @@ spring:
       min-size: 1
       max-size: 6
       max-idle-time: 30m
+      max-life-time: 5m
+      max-acquire-time: 10s
+      max-create-connection-time: 10s
+      max-validation-time: 3s
       validation-query: SELECT 1
   flyway:
     enabled: true
