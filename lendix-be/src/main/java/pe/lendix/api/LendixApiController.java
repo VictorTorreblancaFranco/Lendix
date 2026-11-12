@@ -27,9 +27,9 @@ public class LendixApiController {
     public LendixApiController(DatabaseClient db, WhatsAppNotificationService whatsapp) { this.db = db; this.whatsapp = whatsapp; }
 
     @GetMapping("/customers")
-    public Flux<Map<String,Object>> customers(@RequestParam(defaultValue = "") String q) {
-        return db.sql("SELECT id, full_name, dni, phone, email, active FROM customers WHERE active = true AND (lower(full_name) LIKE lower(:q) OR dni LIKE :q OR phone LIKE :q) ORDER BY full_name")
-                .bind("q", "%" + q.trim() + "%").fetch().all();
+    public Flux<Map<String,Object>> customers(@RequestParam(defaultValue = "") String q, @RequestParam(defaultValue = "false") boolean includeInactive) {
+        String sql = "SELECT id, full_name, dni, phone, email, active FROM customers WHERE " + (includeInactive ? "1=1" : "active = true") + " AND (lower(full_name) LIKE lower(:q) OR dni LIKE :q OR phone LIKE :q) ORDER BY full_name";
+        return db.sql(sql).bind("q", "%" + q.trim() + "%").fetch().all();
     }
 
     @PostMapping("/customers")
@@ -56,6 +56,9 @@ public class LendixApiController {
     public Mono<Void> deactivateCustomer(@PathVariable UUID id) {
         return db.sql("UPDATE customers SET active=false, updated_at=now() WHERE id=:id").bind("id", id).fetch().rowsUpdated().then();
     }
+
+    @PostMapping("/customers/{id}/restore")
+    public Mono<Map<String,Object>> restoreCustomer(@PathVariable UUID id) { return db.sql("UPDATE customers SET active=true, updated_at=now() WHERE id=:id RETURNING id,full_name,dni,phone,email,active").bind("id",id).fetch().one(); }
 
     @GetMapping("/loans")
     public Flux<Map<String,Object>> loans(@RequestParam(defaultValue = "") String status) {
@@ -93,6 +96,9 @@ public class LendixApiController {
 
     @GetMapping("/loans/{id}/payments")
     public Flux<Map<String,Object>> payments(@PathVariable UUID id) { return db.sql("SELECT * FROM payments WHERE loan_id=:id ORDER BY paid_at DESC, created_at DESC").bind("id", id).fetch().all(); }
+
+    @GetMapping("/notifications/upcoming")
+    public Flux<Map<String,Object>> upcomingNotifications() { return db.sql("SELECT i.id,i.installment_number,i.due_date,i.amount_due,c.full_name,l.id AS loan_id FROM installments i JOIN loans l ON l.id=i.loan_id JOIN customers c ON c.id=l.customer_id WHERE l.status IN ('ACTIVE','OVERDUE') AND i.status IN ('PENDING','PARTIAL') AND i.due_date=CURRENT_DATE+1 ORDER BY c.full_name").fetch().all(); }
 
     @GetMapping("/loans/{id}/early-settlement")
     public Mono<Map<String,Object>> earlySettlement(@PathVariable UUID id) { return db.sql("SELECT id,outstanding_principal,interest_rate FROM loans WHERE id=:id").bind("id",id).fetch().one().map(l -> { BigDecimal principal=(BigDecimal)l.get("outstanding_principal"); BigDecimal rate=(BigDecimal)l.get("interest_rate"); BigDecimal interest=principal.multiply(rate).divide(BigDecimal.valueOf(100)); return Map.of("loanId",id,"principal",principal,"estimatedInterest",interest,"estimatedTotal",principal.add(interest)); }); }
