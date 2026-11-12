@@ -110,7 +110,15 @@ public class LendixApiController {
     public Mono<byte[]> receipt(@PathVariable UUID id) { return db.sql("SELECT l.id,c.full_name,c.dni,l.principal,l.total_due,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id",id).fetch().one().switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Préstamo no encontrado"))).map(this::pdf); }
 
     @GetMapping(value="/reports/portfolio.pdf", produces=MediaType.APPLICATION_PDF_VALUE)
-    public Mono<byte[]> portfolioPdf() { return db.sql("SELECT c.full_name,c.dni,l.principal,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id ORDER BY c.full_name").fetch().all().collectList().map(this::portfolioPdfBytes); }
+    public Mono<byte[]> portfolioPdf() {
+        String sql = "SELECT c.full_name,c.dni,l.principal,l.total_due,l.outstanding_principal,l.status,l.term_count, "
+                + "COUNT(i.id) AS total_installments, COUNT(i.id) FILTER (WHERE i.status='PAID') AS paid_installments, "
+                + "COUNT(i.id) FILTER (WHERE i.status='PARTIAL') AS partial_installments, "
+                + "COUNT(i.id) FILTER (WHERE i.status IN ('PENDING','PARTIAL')) AS pending_installments "
+                + "FROM loans l JOIN customers c ON c.id=l.customer_id LEFT JOIN installments i ON i.loan_id=l.id "
+                + "GROUP BY c.full_name,c.dni,l.id ORDER BY c.full_name,l.created_at DESC";
+        return db.sql(sql).fetch().all().collectList().map(this::portfolioPdfBytes);
+    }
 
     @GetMapping(value="/payments/{id}/receipt", produces=MediaType.APPLICATION_PDF_VALUE)
     public Mono<byte[]> paymentReceipt(@PathVariable UUID id) { return db.sql("SELECT p.id,p.amount,p.paid_at,p.payment_method,c.full_name,c.dni,l.id AS loan_id FROM payments p JOIN loans l ON l.id=p.loan_id JOIN customers c ON c.id=l.customer_id WHERE p.id=:id").bind("id", id).fetch().one().switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Pago no encontrado"))).map(this::paymentPdf); }
@@ -124,7 +132,19 @@ public class LendixApiController {
     private byte[] pdf(Map<String,Object> row) { try (var doc=new PDDocument(); var out=new ByteArrayOutputStream()) { var page=new PDPage(); doc.addPage(page); try(var cs=new PDPageContentStream(doc,page)){ cs.beginText(); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD),18); cs.newLineAtOffset(60,730); cs.showText("LENDIX - Comprobante de préstamo"); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA),12); cs.newLineAtOffset(0,-35); cs.showText("Cliente: "+row.get("full_name")); cs.newLineAtOffset(0,-22); cs.showText("DNI: "+row.get("dni")); cs.newLineAtOffset(0,-22); cs.showText("Capital: S/ "+row.get("principal")); cs.newLineAtOffset(0,-22); cs.showText("Total programado: S/ "+row.get("total_due")); cs.newLineAtOffset(0,-22); cs.showText("Saldo de capital: S/ "+row.get("outstanding_principal")); cs.newLineAtOffset(0,-22); cs.showText("Estado: "+row.get("status")); cs.endText(); } doc.save(out); return out.toByteArray(); } catch(Exception e){ throw new IllegalStateException("No se pudo generar el comprobante",e); } }
 
     private byte[] paymentPdf(Map<String,Object> row) { return simplePdf("LENDIX - Voucher de pago", "Cliente: "+row.get("full_name"), "DNI: "+row.get("dni"), "Importe: S/ "+row.get("amount"), "Fecha: "+row.get("paid_at"), "Método: "+row.get("payment_method")); }
-    private byte[] portfolioPdfBytes(java.util.List<Map<String,Object>> rows) { var lines = new java.util.ArrayList<String>(); lines.add("Reporte de cartera"); lines.add("Registros: "+rows.size()); rows.forEach(r -> lines.add(r.get("full_name")+" | S/ "+r.get("principal")+" | Saldo S/ "+r.get("outstanding_principal")+" | "+r.get("status"))); return simplePdf(lines.toArray(String[]::new)); }
+    private byte[] portfolioPdfBytes(java.util.List<Map<String,Object>> rows) {
+        var lines = new java.util.ArrayList<String>();
+        lines.add("LENDIX - Reporte de cartera");
+        lines.add("Generado: " + LocalDate.now());
+        lines.add("Prestamos registrados: " + rows.size());
+        rows.forEach(r -> {
+            lines.add("Cliente: " + r.get("full_name") + " | DNI: " + r.get("dni"));
+            lines.add("Capital S/ " + r.get("principal") + " | Total S/ " + r.get("total_due") + " | Saldo S/ " + r.get("outstanding_principal"));
+            lines.add("Cuotas: " + r.get("paid_installments") + " pagadas | " + r.get("partial_installments") + " parciales | " + r.get("pending_installments") + " pendientes | Estado: " + r.get("status"));
+            lines.add("------------------------------------------------------------");
+        });
+        return simplePdf(lines.toArray(String[]::new));
+    }
     private byte[] simplePdf(String... lines) { try (var doc=new PDDocument(); var out=new ByteArrayOutputStream()) { var page=new PDPage(); doc.addPage(page); try(var cs=new PDPageContentStream(doc,page)){ cs.beginText(); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD),18); cs.newLineAtOffset(60,730); cs.showText(lines[0]); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA),11); for(int i=1;i<lines.length;i++){ cs.newLineAtOffset(0,-24); cs.showText(lines[i].replaceAll("[^\\x20-\\x7E]", " ")); } cs.endText(); } doc.save(out); return out.toByteArray(); } catch(Exception e){ throw new IllegalStateException("No se pudo generar el PDF",e); } }
 
     @PostMapping("/loans/{id}/extension")
