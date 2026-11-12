@@ -112,6 +112,14 @@ public class LendixApiController {
     @GetMapping(value="/loans/{id}/receipt", produces=MediaType.APPLICATION_PDF_VALUE)
     public Mono<byte[]> receipt(@PathVariable UUID id) { return db.sql("SELECT l.id,c.full_name,c.dni,l.principal,l.total_due,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id",id).fetch().one().switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Préstamo no encontrado"))).map(this::pdf); }
 
+    @GetMapping(value="/loans/{id}/report.pdf", produces=MediaType.APPLICATION_PDF_VALUE)
+    public Mono<byte[]> loanReport(@PathVariable UUID id) {
+        Mono<Map<String,Object>> loan = db.sql("SELECT l.id,c.full_name,c.dni,l.principal,l.total_due,l.outstanding_principal,l.status,l.term_count FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id",id).fetch().one();
+        Mono<java.util.List<Map<String,Object>>> installments = db.sql("SELECT installment_number,due_date,amount_due,amount_paid,status FROM installments WHERE loan_id=:id ORDER BY installment_number").bind("id",id).fetch().all().collectList();
+        Mono<java.util.List<Map<String,Object>>> payments = db.sql("SELECT paid_at,amount,payment_method,notes FROM payments WHERE loan_id=:id ORDER BY paid_at,created_at").bind("id",id).fetch().all().collectList();
+        return Mono.zip(loan, installments, payments).map(t -> loanReportBytes(t.getT1(), t.getT2(), t.getT3())).switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Préstamo no encontrado")));
+    }
+
     @GetMapping(value="/reports/portfolio.pdf", produces=MediaType.APPLICATION_PDF_VALUE)
     public Mono<byte[]> portfolioPdf() {
         String sql = "SELECT c.full_name,c.dni,l.principal,l.total_due,l.outstanding_principal,l.status,l.term_count, "
@@ -135,6 +143,9 @@ public class LendixApiController {
     private byte[] pdf(Map<String,Object> row) { try (var doc=new PDDocument(); var out=new ByteArrayOutputStream()) { var page=new PDPage(); doc.addPage(page); try(var cs=new PDPageContentStream(doc,page)){ cs.beginText(); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD),18); cs.newLineAtOffset(60,730); cs.showText("LENDIX - Comprobante de préstamo"); cs.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA),12); cs.newLineAtOffset(0,-35); cs.showText("Cliente: "+row.get("full_name")); cs.newLineAtOffset(0,-22); cs.showText("DNI: "+row.get("dni")); cs.newLineAtOffset(0,-22); cs.showText("Capital: S/ "+row.get("principal")); cs.newLineAtOffset(0,-22); cs.showText("Total programado: S/ "+row.get("total_due")); cs.newLineAtOffset(0,-22); cs.showText("Saldo de capital: S/ "+row.get("outstanding_principal")); cs.newLineAtOffset(0,-22); cs.showText("Estado: "+row.get("status")); cs.endText(); } doc.save(out); return out.toByteArray(); } catch(Exception e){ throw new IllegalStateException("No se pudo generar el comprobante",e); } }
 
     private byte[] paymentPdf(Map<String,Object> row) { return simplePdf("LENDIX - Voucher de pago", "Cliente: "+row.get("full_name"), "DNI: "+row.get("dni"), "Importe: S/ "+row.get("amount"), "Fecha: "+row.get("paid_at"), "Método: "+row.get("payment_method")); }
+    private byte[] loanReportBytes(Map<String,Object> loan, java.util.List<Map<String,Object>> installments, java.util.List<Map<String,Object>> payments) {
+        var lines = new java.util.ArrayList<String>(); lines.add("LENDIX - Reporte del prestamo"); lines.add("Cliente: "+loan.get("full_name")+" | DNI: "+loan.get("dni")); lines.add("Capital: S/ "+loan.get("principal")+" | Total: S/ "+loan.get("total_due")+" | Saldo: S/ "+loan.get("outstanding_principal")); lines.add("Estado: "+loan.get("status")); lines.add("CUOTAS"); installments.forEach(i -> lines.add("Cuota "+i.get("installment_number")+" | "+i.get("due_date")+" | S/ "+i.get("amount_due")+" | Pagado S/ "+i.get("amount_paid")+" | "+i.get("status"))); lines.add("PAGOS"); payments.forEach(p -> lines.add(p.get("paid_at")+" | S/ "+p.get("amount")+" | "+p.get("payment_method")+" | "+(p.get("notes")==null?"":p.get("notes")))); return simplePdf(lines.toArray(String[]::new));
+    }
     private byte[] portfolioPdfBytes(java.util.List<Map<String,Object>> rows) {
         var lines = new java.util.ArrayList<String>();
         lines.add("LENDIX - Reporte de cartera");
