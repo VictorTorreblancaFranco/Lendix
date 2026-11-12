@@ -1,0 +1,9 @@
+{
+  "buildCommand": "cd lendix-fe && npm run build",
+  "installCommand": "cd lendix-fe && npm ci",
+  "outputDirectory": "lendix-fe/dist/lendix-fe/browser",
+  "framework": null,
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
