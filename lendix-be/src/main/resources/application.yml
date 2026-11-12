@@ -4,6 +4,13 @@ spring:
     url: ${DB_URL:r2dbc:postgresql://localhost:5432/lendix}
     username: ${DB_USERNAME:postgres}
     password: ${DB_PASSWORD:postgres}
+    pool:
+      enabled: true
+      initial-size: 1
+      min-size: 1
+      max-size: 6
+      max-idle-time: 30m
+      validation-query: SELECT 1
   flyway:
     enabled: true
     url: ${FLYWAY_URL:jdbc:postgresql://localhost:5432/lendix}
