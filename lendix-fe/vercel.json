@@ -3,6 +3,10 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist/lendix-fe/browser",
   "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://lendix-be-420077667925.us-central1.run.app/api/:path*"
+    },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
