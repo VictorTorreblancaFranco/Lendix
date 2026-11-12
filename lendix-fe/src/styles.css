@@ -9,3 +9,9 @@ button{transition:transform .14s ease,filter .14s ease,box-shadow .14s ease}butt
 .partial-status{background:#fff4d6!important;color:#a16207!important}.pay-action{margin-left:8px}
 .status-cell{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.status-cell .pay-action{margin-left:0}.row{align-items:center}
 .installment-row{grid-template-columns:.45fr 1.2fr 1fr 1.45fr 1.25fr;min-height:64px}.installment-row>span{min-width:0}.installment-row .installment-number{font-weight:800}.row-actions{display:flex;justify-content:flex-end;gap:8px}.row-actions .pay-action{white-space:nowrap}.partial-status{background:#fff2d8;color:#b87516}.modal-backdrop .table{width:min(1180px,100%)}@media(max-width:800px){.installment-row{grid-template-columns:.4fr 1fr 1fr 1.35fr;gap:8px}.installment-row .row-actions{grid-column:2/-1;justify-content:flex-start}.modal-backdrop .table .row{min-width:0}}
+/* Alineacion estricta del detalle de cuotas */
+.modal-backdrop .detail-head,.modal-backdrop .table{width:min(1120px,100%);max-width:1120px}
+.modal-backdrop .table{overflow-x:hidden}
+.modal-backdrop .table .row{min-width:0;grid-template-columns:.45fr 1.25fr 1fr 1.45fr 1.25fr}
+.modal-backdrop .table .row.head{padding-right:8px}
+@media(max-width:800px){.modal-backdrop .table .row{grid-template-columns:.4fr 1fr 1fr 1.3fr}.modal-backdrop .table .row.head span:last-child{display:none}}
