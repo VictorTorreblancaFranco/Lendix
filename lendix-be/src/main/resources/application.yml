@@ -21,6 +21,6 @@ spring:
     user: ${FLYWAY_USER:postgres}
     password: ${FLYWAY_PASSWORD:postgres}
   jackson.time-zone: America/Lima
-server.port: ${SERVER_PORT:8080}
+server.port: ${PORT:${SERVER_PORT:8080}}
 management.endpoints.web.exposure.include: health,info
 
