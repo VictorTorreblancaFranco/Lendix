@@ -15,3 +15,4 @@ button{transition:transform .14s ease,filter .14s ease,box-shadow .14s ease}butt
 .modal-backdrop .table .row{min-width:0;grid-template-columns:.45fr 1.25fr 1fr 1.45fr 1.25fr}
 .modal-backdrop .table .row.head{padding-right:8px}
 @media(max-width:800px){.modal-backdrop .table .row{grid-template-columns:.4fr 1fr 1fr 1.3fr}.modal-backdrop .table .row.head span:last-child{display:none}}
+.report-button{text-decoration:none;display:inline-flex;align-items:center}.history-table .row{grid-template-columns:1.6fr 1fr 1fr 1fr}.paid-status{background:#eeeaff;color:#6046cf}.history-table .row:not(.head){cursor:pointer}.history-table .row:not(.head):hover{background:#faf9ff}
