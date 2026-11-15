@@ -47,7 +47,9 @@ public class LendixApiController {
         spec = request.email() == null ? spec.bindNull("email", String.class) : spec.bind("email", request.email());
         spec = request.address() == null ? spec.bindNull("address", String.class) : spec.bind("address", request.address());
         spec = request.notes() == null ? spec.bindNull("notes", String.class) : spec.bind("notes", request.notes());
-        return spec.fetch().one();
+        Mono<Map<String,Object>> duplicateCheck = db.sql("SELECT id FROM customers WHERE dni=:dni").bind("dni", request.dni()).fetch().one()
+                .flatMap(existing -> Mono.<Map<String,Object>>error(new ResponseStatusException(HttpStatus.CONFLICT, "Ya existe un cliente con ese DNI")));
+        return duplicateCheck.switchIfEmpty(spec.fetch().one());
     }
 
     @PutMapping("/customers/{id}")
