@@ -40,8 +40,14 @@ public class LendixApiController {
     @PostMapping("/customers")
     @ResponseStatus(HttpStatus.CREATED)
     public Mono<Map<String,Object>> createCustomer(@RequestBody CustomerRequest request) {
-        if (request.fullName() == null || request.fullName().isBlank() || request.dni() == null || !request.dni().matches("\\d{8}") || request.phone() == null || request.phone().isBlank())
-            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Nombre, DNI válido y teléfono son obligatorios"));
+        if (request.fullName() == null || request.fullName().isBlank() || request.fullName().trim().length() < 3)
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "El nombre es obligatorio y debe tener al menos 3 caracteres"));
+        if (request.dni() == null || !request.dni().matches("\\d{8}"))
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "El DNI debe contener exactamente 8 dígitos"));
+        if (request.phone() == null || !request.phone().matches("\\d{9}"))
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "El teléfono debe contener exactamente 9 dígitos"));
+        if (request.email() != null && !request.email().isBlank() && !request.email().matches("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"))
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "El correo electrónico no tiene un formato válido"));
         var spec = db.sql("INSERT INTO customers(full_name,dni,phone,email,address,notes) VALUES(:name,:dni,:phone,:email,:address,:notes) RETURNING id,full_name,dni,phone,email,active")
                 .bind("name", request.fullName().trim()).bind("dni", request.dni()).bind("phone", request.phone().trim());
         spec = request.email() == null ? spec.bindNull("email", String.class) : spec.bind("email", request.email());
