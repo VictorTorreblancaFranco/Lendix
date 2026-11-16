@@ -20,6 +20,7 @@ import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
 import java.io.ByteArrayOutputStream;
+import java.awt.Color;
 import pe.lendix.notifications.WhatsAppNotificationService;
 import org.springframework.transaction.reactive.TransactionalOperator;
 
@@ -233,21 +234,33 @@ public class LendixApiController {
     public Mono<byte[]> loanSchedule(@PathVariable UUID id) {
         Mono<Map<String,Object>> loan = db.sql("SELECT c.full_name,c.dni,l.principal,l.total_due,l.outstanding_principal,l.status,l.payment_frequency FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id", id).fetch().one();
         Mono<List<Map<String,Object>>> installments = db.sql("SELECT installment_number,due_date,amount_due,amount_paid,status FROM installments WHERE loan_id=:id ORDER BY installment_number").bind("id", id).fetch().all().collectList();
-        return Mono.zip(loan, installments).map(t -> {
-            var l = t.getT1();
-            var lines = new ArrayList<String>();
-            lines.add("LENDIX - Cronograma de pagos");
-            lines.add("Cliente: " + l.get("full_name") + " | DNI: " + l.get("dni"));
-            lines.add("Capital: S/ " + l.get("principal") + " | Total programado: S/ " + l.get("total_due"));
-            lines.add("Frecuencia: " + l.get("payment_frequency") + " | Saldo actual: S/ " + l.get("outstanding_principal"));
-            lines.add("CUOTA | VENCIMIENTO | IMPORTE | PAGADO | SALDO | ESTADO");
-            t.getT2().forEach(i -> {
-                BigDecimal due = (BigDecimal) i.get("amount_due");
-                BigDecimal paid = (BigDecimal) i.get("amount_paid");
-                lines.add(i.get("installment_number") + " | " + i.get("due_date") + " | S/ " + due + " | S/ " + paid + " | S/ " + due.subtract(paid == null ? BigDecimal.ZERO : paid).max(BigDecimal.ZERO) + " | " + i.get("status"));
-            });
-            return simplePdf(lines.toArray(String[]::new));
-        }).switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Préstamo no encontrado")));
+        return Mono.zip(loan, installments).map(t -> schedulePdfBytes(t.getT1(), t.getT2())).switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Préstamo no encontrado")));
+    }
+
+    private byte[] schedulePdfBytes(Map<String,Object> loan, List<Map<String,Object>> installments) {
+        try (var doc = new PDDocument(); var out = new ByteArrayOutputStream()) {
+            PDPage page = new PDPage(); doc.addPage(page);
+            try (var cs = new PDPageContentStream(doc, page)) {
+                var bold = new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD);
+                var regular = new PDType1Font(Standard14Fonts.FontName.HELVETICA);
+                cs.setNonStrokingColor(new Color(25, 22, 52)); cs.addRect(0, 700, 612, 92); cs.fill();
+                cs.setNonStrokingColor(new Color(53, 199, 151)); cs.addRect(42, 728, 34, 34); cs.fill();
+                cs.beginText(); cs.setNonStrokingColor(Color.WHITE); cs.setFont(bold, 22); cs.newLineAtOffset(53, 738); cs.showText("L"); cs.endText();
+                cs.beginText(); cs.setFont(bold, 22); cs.newLineAtOffset(88, 744); cs.showText("LENDIX"); cs.setFont(regular, 10); cs.newLineAtOffset(0, -18); cs.showText("Cronograma de pagos"); cs.endText();
+                cs.beginText(); cs.setNonStrokingColor(new Color(25, 22, 52)); cs.setFont(bold, 17); cs.newLineAtOffset(42, 660); cs.showText(cleanPdf(String.valueOf(loan.get("full_name")))); cs.setFont(regular, 10); cs.newLineAtOffset(0, -18); cs.showText("DNI: " + cleanPdf(String.valueOf(loan.get("dni")))); cs.endText();
+                cs.setNonStrokingColor(new Color(239, 247, 244)); cs.addRect(42, 570, 528, 48); cs.fill();
+                cs.beginText(); cs.setNonStrokingColor(new Color(25, 22, 52)); cs.setFont(bold, 10); cs.newLineAtOffset(56, 598); cs.showText("CAPITAL"); cs.newLineAtOffset(170, 0); cs.showText("TOTAL PROGRAMADO"); cs.newLineAtOffset(190, 0); cs.showText("SALDO ACTUAL"); cs.setFont(regular, 12); cs.newLineAtOffset(-360, -19); cs.showText("S/ " + loan.get("principal")); cs.newLineAtOffset(170, 0); cs.showText("S/ " + loan.get("total_due")); cs.newLineAtOffset(190, 0); cs.showText("S/ " + loan.get("outstanding_principal")); cs.endText();
+                float y = 535; cs.setNonStrokingColor(new Color(110, 116, 140)); cs.setFont(bold, 9); cs.beginText(); cs.newLineAtOffset(48, y); cs.showText("CUOTA"); cs.newLineAtOffset(68, 0); cs.showText("VENCIMIENTO"); cs.newLineAtOffset(122, 0); cs.showText("IMPORTE"); cs.newLineAtOffset(92, 0); cs.showText("PAGADO"); cs.newLineAtOffset(92, 0); cs.showText("PENDIENTE"); cs.newLineAtOffset(92, 0); cs.showText("ESTADO"); cs.endText();
+                y -= 18;
+                for (var i : installments) {
+                    BigDecimal due = (BigDecimal)i.get("amount_due"); BigDecimal paid = i.get("amount_paid") == null ? BigDecimal.ZERO : (BigDecimal)i.get("amount_paid"); BigDecimal pending = due.subtract(paid).max(BigDecimal.ZERO);
+                    cs.setStrokingColor(new Color(231,233,241)); cs.moveTo(42, y + 12); cs.lineTo(570, y + 12); cs.stroke();
+                    cs.beginText(); cs.setNonStrokingColor(new Color(25,22,52)); cs.setFont(regular, 9); cs.newLineAtOffset(48, y - 2); cs.showText(String.valueOf(i.get("installment_number"))); cs.newLineAtOffset(68, 0); cs.showText(String.valueOf(i.get("due_date"))); cs.newLineAtOffset(122, 0); cs.showText("S/ " + due); cs.newLineAtOffset(92, 0); cs.showText("S/ " + paid); cs.newLineAtOffset(92, 0); cs.showText("S/ " + pending); cs.newLineAtOffset(92, 0); cs.showText(cleanPdf(String.valueOf(i.get("status")))); cs.endText(); y -= 28;
+                }
+                cs.setNonStrokingColor(new Color(25,22,52)); cs.addRect(42, 47, 528, 38); cs.fill(); cs.beginText(); cs.setNonStrokingColor(Color.WHITE); cs.setFont(bold, 9); cs.newLineAtOffset(56, 69); cs.showText("MÉTODOS DE PAGO"); cs.setFont(regular, 9); cs.newLineAtOffset(108, 0); cs.showText("Yape / Plin: 930 574 584 · Victor Torreblanca"); cs.endText();
+            }
+            doc.save(out); return out.toByteArray();
+        } catch (Exception e) { throw new IllegalStateException("No se pudo generar el cronograma", e); }
     }
 
     @GetMapping(value="/reports/portfolio.pdf", produces=MediaType.APPLICATION_PDF_VALUE)
