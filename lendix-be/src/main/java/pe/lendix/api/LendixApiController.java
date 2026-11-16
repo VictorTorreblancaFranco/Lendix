@@ -34,7 +34,12 @@ public class LendixApiController {
 
     @GetMapping("/customers")
     public Flux<Map<String,Object>> customers(@RequestParam(defaultValue = "") String q, @RequestParam(defaultValue = "false") boolean includeInactive) {
-        String sql = "SELECT id, full_name, dni, phone, email, active FROM customers WHERE " + (includeInactive ? "1=1" : "active = true") + " AND (lower(full_name) LIKE lower(:q) OR dni LIKE :q OR phone LIKE :q) ORDER BY full_name";
+        String sql = "SELECT c.id, c.full_name, c.dni, c.phone, c.email, c.active, "
+                + "COALESCE((SELECT COUNT(*) FROM installments i JOIN loans l ON l.id=i.loan_id WHERE l.customer_id=c.id AND i.status='PAID'),0) AS paid_installments, "
+                + "COALESCE((SELECT COUNT(*) FROM installments i JOIN loans l ON l.id=i.loan_id WHERE l.customer_id=c.id AND i.status IN ('PENDING','PARTIAL')),0) AS pending_installments, "
+                + "COALESCE((SELECT COUNT(*) FROM installments i JOIN loans l ON l.id=i.loan_id WHERE l.customer_id=c.id AND i.status='PAID' AND (SELECT MAX(p.paid_at) FROM payments p WHERE p.installment_id=i.id) > i.due_date),0) AS late_installments, "
+                + "COALESCE((SELECT COUNT(*) FROM installments i JOIN loans l ON l.id=i.loan_id WHERE l.customer_id=c.id AND i.status='PAID' AND (SELECT MAX(p.paid_at) FROM payments p WHERE p.installment_id=i.id) <= i.due_date),0) AS on_time_installments "
+                + "FROM customers c WHERE " + (includeInactive ? "1=1" : "c.active = true") + " AND (lower(c.full_name) LIKE lower(:q) OR c.dni LIKE :q OR c.phone LIKE :q) ORDER BY c.full_name";
         return db.sql(sql).bind("q", "%" + q.trim() + "%").fetch().all();
     }
 
@@ -76,7 +81,7 @@ public class LendixApiController {
 
     @GetMapping("/loans")
     public Flux<Map<String,Object>> loans(@RequestParam(defaultValue = "") String status) {
-        String sql = "SELECT l.id,l.customer_id,c.full_name,l.principal,l.interest_rate,l.rate_period,l.term_count,l.payment_frequency,l.disbursement_date,l.first_due_date,l.status,l.total_due,l.outstanding_principal FROM loans l JOIN customers c ON c.id=l.customer_id " + (status.isBlank() ? "" : "WHERE l.status=:status ") + "ORDER BY l.created_at DESC";
+        String sql = "SELECT l.id,l.customer_id,c.full_name,c.dni,l.principal,l.interest_rate,l.rate_period,l.term_count,l.payment_frequency,l.disbursement_date,l.first_due_date,l.status,l.total_due,l.outstanding_principal FROM loans l JOIN customers c ON c.id=l.customer_id " + (status.isBlank() ? "" : "WHERE l.status=:status ") + "ORDER BY l.created_at DESC";
         var spec = db.sql(sql); if (!status.isBlank()) spec = spec.bind("status", status); return spec.fetch().all();
     }
 
@@ -137,7 +142,7 @@ public class LendixApiController {
 
     @GetMapping("/payments")
     public Flux<Map<String,Object>> allPayments(@RequestParam(defaultValue = "") String customerId) {
-        String sql = "SELECT p.id,p.loan_id,p.installment_id,p.paid_at,p.amount,p.principal_paid,p.interest_paid,p.payment_method,p.notes,p.created_at,p.reversed_at,p.reversal_reason,c.id AS customer_id,c.full_name,c.dni FROM payments p JOIN loans l ON l.id=p.loan_id JOIN customers c ON c.id=l.customer_id "
+        String sql = "SELECT p.id,p.loan_id,p.installment_id,p.paid_at,p.amount,p.principal_paid,p.interest_paid,p.payment_method,p.notes,p.created_at,p.reversed_at,p.reversal_reason,c.id AS customer_id,c.full_name,c.dni,i.due_date,CASE WHEN i.due_date IS NULL THEN 'N/A' WHEN p.paid_at <= i.due_date THEN 'A_TIEMPO' ELSE 'CON_RETRASO' END AS timeliness FROM payments p JOIN loans l ON l.id=p.loan_id JOIN customers c ON c.id=l.customer_id LEFT JOIN installments i ON i.id=p.installment_id "
                 + (customerId.isBlank() ? "" : "WHERE c.id=:customerId ") + "ORDER BY p.paid_at DESC,p.created_at DESC";
         var spec = db.sql(sql); if (!customerId.isBlank()) spec = spec.bind("customerId", UUID.fromString(customerId)); return spec.fetch().all();
     }
@@ -249,7 +254,7 @@ public class LendixApiController {
                 cs.beginText(); cs.setFont(bold, 22); cs.newLineAtOffset(88, 744); cs.showText("LENDIX"); cs.setFont(regular, 10); cs.newLineAtOffset(0, -18); cs.showText("Cronograma de pagos"); cs.endText();
                 cs.beginText(); cs.setNonStrokingColor(new Color(25, 22, 52)); cs.setFont(bold, 17); cs.newLineAtOffset(42, 660); cs.showText(cleanPdf(String.valueOf(loan.get("full_name")))); cs.setFont(regular, 10); cs.newLineAtOffset(0, -18); cs.showText("DNI: " + cleanPdf(String.valueOf(loan.get("dni")))); cs.endText();
                 cs.setNonStrokingColor(new Color(239, 247, 244)); cs.addRect(42, 570, 528, 48); cs.fill();
-                cs.beginText(); cs.setNonStrokingColor(new Color(25, 22, 52)); cs.setFont(bold, 10); cs.newLineAtOffset(56, 598); cs.showText("CAPITAL"); cs.newLineAtOffset(170, 0); cs.showText("TOTAL PROGRAMADO"); cs.newLineAtOffset(190, 0); cs.showText("SALDO ACTUAL"); cs.setFont(regular, 12); cs.newLineAtOffset(-360, -19); cs.showText("S/ " + loan.get("principal")); cs.newLineAtOffset(170, 0); cs.showText("S/ " + loan.get("total_due")); cs.newLineAtOffset(190, 0); cs.showText("S/ " + loan.get("outstanding_principal")); cs.endText();
+                cs.beginText(); cs.setNonStrokingColor(new Color(25, 22, 52)); cs.setFont(bold, 10); cs.newLineAtOffset(56, 598); cs.showText("MONTO PRESTADO"); cs.newLineAtOffset(190, 0); cs.showText("TOTAL A PAGAR"); cs.newLineAtOffset(170, 0); cs.showText("SALDO ACTUAL"); cs.setFont(regular, 12); cs.newLineAtOffset(-360, -19); cs.showText("S/ " + loan.get("principal")); cs.newLineAtOffset(190, 0); cs.showText("S/ " + loan.get("total_due")); cs.newLineAtOffset(170, 0); cs.showText("S/ " + loan.get("outstanding_principal")); cs.endText();
                 float y = 535; cs.setNonStrokingColor(new Color(110, 116, 140)); cs.setFont(bold, 9); cs.beginText(); cs.newLineAtOffset(48, y); cs.showText("CUOTA"); cs.newLineAtOffset(68, 0); cs.showText("VENCIMIENTO"); cs.newLineAtOffset(122, 0); cs.showText("IMPORTE"); cs.newLineAtOffset(92, 0); cs.showText("PAGADO"); cs.newLineAtOffset(92, 0); cs.showText("PENDIENTE"); cs.newLineAtOffset(92, 0); cs.showText("ESTADO"); cs.endText();
                 y -= 18;
                 for (var i : installments) {
