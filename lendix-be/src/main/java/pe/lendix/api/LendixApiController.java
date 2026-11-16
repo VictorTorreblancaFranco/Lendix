@@ -75,7 +75,7 @@ public class LendixApiController {
 
     @GetMapping("/loans")
     public Flux<Map<String,Object>> loans(@RequestParam(defaultValue = "") String status) {
-        String sql = "SELECT l.id,l.customer_id,c.full_name,l.principal,l.interest_rate,l.rate_period,l.term_count,l.payment_frequency,l.disbursement_date,l.status,l.total_due,l.outstanding_principal FROM loans l JOIN customers c ON c.id=l.customer_id " + (status.isBlank() ? "" : "WHERE l.status=:status ") + "ORDER BY l.created_at DESC";
+        String sql = "SELECT l.id,l.customer_id,c.full_name,l.principal,l.interest_rate,l.rate_period,l.term_count,l.payment_frequency,l.disbursement_date,l.first_due_date,l.status,l.total_due,l.outstanding_principal FROM loans l JOIN customers c ON c.id=l.customer_id " + (status.isBlank() ? "" : "WHERE l.status=:status ") + "ORDER BY l.created_at DESC";
         var spec = db.sql(sql); if (!status.isBlank()) spec = spec.bind("status", status); return spec.fetch().all();
     }
 
@@ -88,7 +88,7 @@ public class LendixApiController {
         String frequency = r.paymentFrequency() == null ? "MONTHLY" : r.paymentFrequency();
         LocalDate disbursement = r.disbursementDate() == null ? LocalDate.now() : r.disbursementDate();
         if (r.firstDueDate() == null) return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Indica la primera fecha de pago"));
-        BigDecimal periodFactor = switch (frequency.toUpperCase()) { case "WEEKLY" -> BigDecimal.valueOf(0.25); case "BIWEEKLY" -> BigDecimal.valueOf(0.5); case "DAILY" -> BigDecimal.valueOf(1).divide(BigDecimal.valueOf(30), 6, java.math.RoundingMode.HALF_UP); default -> BigDecimal.ONE; };
+        BigDecimal periodFactor = switch (frequency.toUpperCase()) { case "WEEKLY" -> BigDecimal.valueOf(0.25); case "BIWEEKLY" -> BigDecimal.valueOf(0.5); case "DAILY" -> BigDecimal.ONE.divide(BigDecimal.valueOf(30), 6, java.math.RoundingMode.HALF_UP); default -> BigDecimal.ONE; };
         BigDecimal interest = r.principal().multiply(r.interestRate()).divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP).multiply(periodFactor).setScale(2, java.math.RoundingMode.HALF_UP);
         BigDecimal total = r.principal().add(interest.multiply(BigDecimal.valueOf(r.termCount())));
         String requestKey = r.requestId() == null || r.requestId().isBlank() ? UUID.randomUUID().toString() : r.requestId();
@@ -106,9 +106,27 @@ public class LendixApiController {
         BigDecimal principalPart = r.principal().divide(BigDecimal.valueOf(r.termCount()), 2, java.math.RoundingMode.HALF_UP);
         BigDecimal interestPart = interest;
         return Flux.range(1, r.termCount()).concatMap(n -> db.sql("INSERT INTO installments(loan_id,installment_number,due_date,principal_due,interest_due,amount_due) VALUES(:loan,:n,:due,:principal,:interest,:amount)")
-                .bind("loan", loan.get("id")).bind("n", n).bind("due", r.firstDueDate().plusDays(periodDays(r.paymentFrequency()) * (long)(n - 1))).bind("principal", principalPart).bind("interest", interestPart).bind("amount", principalPart.add(interestPart)).fetch().rowsUpdated()).then();
+                .bind("loan", loan.get("id")).bind("n", n).bind("due", dueDate(r.firstDueDate(), r.paymentFrequency(), n - 1)).bind("principal", principalPart).bind("interest", interestPart).bind("amount", principalPart.add(interestPart)).fetch().rowsUpdated()).then();
     }
     private long periodDays(String frequency) { return switch (frequency == null ? "MONTHLY" : frequency.toUpperCase()) { case "DAILY" -> 1; case "WEEKLY" -> 7; case "BIWEEKLY" -> 14; default -> 30; }; }
+    private LocalDate dueDate(LocalDate first, String frequency, int offset) { return switch (frequency == null ? "MONTHLY" : frequency.toUpperCase()) { case "DAILY" -> first.plusDays(offset); case "WEEKLY" -> first.plusWeeks(offset); case "BIWEEKLY" -> first.plusWeeks(offset * 2L); default -> first.plusMonths(offset); }; }
+
+    @PutMapping("/loans/{id}")
+    public Mono<Map<String,Object>> editLoan(@PathVariable UUID id, @RequestBody LoanEditRequest r) {
+        if (r.principal() == null || r.principal().signum() <= 0 || r.interestRate() == null || r.termCount() == null || r.termCount() < 1 || r.termCount() > 365 || r.firstDueDate() == null)
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Los datos del préstamo no son válidos"));
+        String frequency = r.paymentFrequency() == null ? "MONTHLY" : r.paymentFrequency().toUpperCase();
+        BigDecimal factor = switch (frequency) { case "WEEKLY" -> BigDecimal.valueOf(0.25); case "BIWEEKLY" -> BigDecimal.valueOf(0.5); case "DAILY" -> BigDecimal.ONE.divide(BigDecimal.valueOf(30), 6, java.math.RoundingMode.HALF_UP); default -> BigDecimal.ONE; };
+        BigDecimal interest = r.principal().multiply(r.interestRate()).divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP).multiply(factor).setScale(2, java.math.RoundingMode.HALF_UP);
+        BigDecimal total = r.principal().add(interest.multiply(BigDecimal.valueOf(r.termCount())));
+        Mono<Map<String,Object>> flow = db.sql("SELECT id FROM loans WHERE id=:id AND status IN ('ACTIVE','OVERDUE')").bind("id", id).fetch().one()
+                .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "El préstamo no existe o ya está cerrado")))
+                .flatMap(existing -> db.sql("SELECT COUNT(*) AS paid FROM installments WHERE loan_id=:id AND amount_paid>0").bind("id", id).fetch().one()
+                        .flatMap(count -> ((Number) count.get("paid")).longValue() > 0
+                                ? Mono.<Map<String,Object>>error(new ResponseStatusException(HttpStatus.CONFLICT, "No se puede editar un préstamo que ya tiene pagos"))
+                                : db.sql("UPDATE loans SET principal=:principal,interest_rate=:rate,term_count=:terms,payment_frequency=:frequency,first_due_date=:firstDue,total_due=:total,outstanding_principal=:principal,notes=:notes,updated_at=now(),version=version+1 WHERE id=:id").bind("principal", r.principal()).bind("rate", r.interestRate()).bind("terms", r.termCount()).bind("frequency", frequency).bind("firstDue", r.firstDueDate()).bind("total", total).bind("notes", r.notes() == null ? "" : r.notes()).bind("id", id).fetch().rowsUpdated().then(db.sql("DELETE FROM installments WHERE loan_id=:id").bind("id", id).fetch().rowsUpdated()).then(createInstallments(Map.of("id", id), new LoanRequest(null, r.principal(), r.interestRate(), "MONTHLY", r.termCount(), frequency, null, r.firstDueDate(), r.notes(), null), interest)).then(db.sql("SELECT l.id,c.full_name,l.principal,l.interest_rate,l.term_count,l.payment_frequency,l.total_due,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id", id).fetch().one())));
+        return tx.transactional(flow);
+    }
 
     @GetMapping("/loans/{id}/installments")
     public Flux<Map<String,Object>> installments(@PathVariable UUID id) { return db.sql("SELECT * FROM installments WHERE loan_id=:id ORDER BY installment_number").bind("id", id).fetch().all(); }
@@ -166,6 +184,40 @@ public class LendixApiController {
     @GetMapping(value="/reports/portfolio", produces="text/csv")
     public Flux<String> portfolioReport() { return db.sql("SELECT c.full_name,c.dni,l.principal,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id ORDER BY c.full_name").fetch().all().map(r -> String.format("%s,%s,%s,%s,%s",r.get("full_name"),r.get("dni"),r.get("principal"),r.get("outstanding_principal"),r.get("status"))).startWith("cliente,dni,capital,saldo_pendiente,estado\n"); }
 
+    @GetMapping("/capital-contributions")
+    public Flux<Map<String,Object>> capitalContributions() {
+        return db.sql("SELECT id,contributor,amount,contribution_date,returned_amount,(amount-returned_amount) AS pending_amount,notes,created_at FROM capital_contributions ORDER BY contribution_date DESC,created_at DESC").fetch().all();
+    }
+
+    @GetMapping("/capital-contributions/summary")
+    public Flux<Map<String,Object>> capitalContributionSummary() {
+        return db.sql("SELECT contributor,COALESCE(SUM(amount),0) AS contributed,COALESCE(SUM(returned_amount),0) AS returned,COALESCE(SUM(amount-returned_amount),0) AS pending FROM capital_contributions GROUP BY contributor ORDER BY contributor").fetch().all();
+    }
+
+    @PostMapping("/capital-contributions")
+    @ResponseStatus(HttpStatus.CREATED)
+    public Mono<Map<String,Object>> createCapitalContribution(@RequestBody CapitalContributionRequest request) {
+        if (request.contributor() == null || !List.of("GENERAL", "VICTOR", "HERMANO").contains(request.contributor().toUpperCase()))
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Selecciona un tipo de capital válido"));
+        if (request.amount() == null || request.amount().signum() <= 0 || request.amount().scale() > 2)
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "El aporte debe ser un monto positivo"));
+        return db.sql("INSERT INTO capital_contributions(contributor,amount,contribution_date,notes) VALUES(:contributor,:amount,:date,:notes) RETURNING id,contributor,amount,contribution_date,returned_amount,(amount-returned_amount) AS pending_amount,notes")
+                .bind("contributor", request.contributor().toUpperCase())
+                .bind("amount", request.amount())
+                .bind("date", request.contributionDate() == null ? LocalDate.now() : request.contributionDate())
+                .bind("notes", request.notes() == null ? "" : request.notes().trim())
+                .fetch().one();
+    }
+
+    @PostMapping("/capital-contributions/{id}/return")
+    public Mono<Map<String,Object>> registerCapitalReturn(@PathVariable UUID id, @RequestBody CapitalReturnRequest request) {
+        if (request.amount() == null || request.amount().signum() <= 0 || request.amount().scale() > 2)
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "La devolución debe ser un monto positivo"));
+        return db.sql("UPDATE capital_contributions SET returned_amount=returned_amount+:amount,updated_at=now() WHERE id=:id AND returned_amount+:amount<=amount RETURNING id,contributor,amount,contribution_date,returned_amount,(amount-returned_amount) AS pending_amount,notes")
+                .bind("id", id).bind("amount", request.amount()).fetch().one()
+                .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "La devolución supera el saldo pendiente o el aporte no existe")));
+    }
+
     @GetMapping(value="/loans/{id}/receipt", produces=MediaType.APPLICATION_PDF_VALUE)
     public Mono<byte[]> receipt(@PathVariable UUID id) { return db.sql("SELECT l.id,c.full_name,c.dni,l.principal,l.total_due,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id",id).fetch().one().switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Préstamo no encontrado"))).map(this::pdf); }
 
@@ -175,6 +227,27 @@ public class LendixApiController {
         Mono<java.util.List<Map<String,Object>>> installments = db.sql("SELECT installment_number,due_date,amount_due,amount_paid,status FROM installments WHERE loan_id=:id ORDER BY installment_number").bind("id",id).fetch().all().collectList();
         Mono<java.util.List<Map<String,Object>>> payments = db.sql("SELECT paid_at,amount,payment_method,notes FROM payments WHERE loan_id=:id ORDER BY paid_at,created_at").bind("id",id).fetch().all().collectList();
         return Mono.zip(loan, installments, payments).map(t -> loanReportBytes(t.getT1(), t.getT2(), t.getT3())).switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND,"Préstamo no encontrado")));
+    }
+
+    @GetMapping(value="/loans/{id}/schedule.pdf", produces=MediaType.APPLICATION_PDF_VALUE)
+    public Mono<byte[]> loanSchedule(@PathVariable UUID id) {
+        Mono<Map<String,Object>> loan = db.sql("SELECT c.full_name,c.dni,l.principal,l.total_due,l.outstanding_principal,l.status,l.payment_frequency FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id", id).fetch().one();
+        Mono<List<Map<String,Object>>> installments = db.sql("SELECT installment_number,due_date,amount_due,amount_paid,status FROM installments WHERE loan_id=:id ORDER BY installment_number").bind("id", id).fetch().all().collectList();
+        return Mono.zip(loan, installments).map(t -> {
+            var l = t.getT1();
+            var lines = new ArrayList<String>();
+            lines.add("LENDIX - Cronograma de pagos");
+            lines.add("Cliente: " + l.get("full_name") + " | DNI: " + l.get("dni"));
+            lines.add("Capital: S/ " + l.get("principal") + " | Total programado: S/ " + l.get("total_due"));
+            lines.add("Frecuencia: " + l.get("payment_frequency") + " | Saldo actual: S/ " + l.get("outstanding_principal"));
+            lines.add("CUOTA | VENCIMIENTO | IMPORTE | PAGADO | SALDO | ESTADO");
+            t.getT2().forEach(i -> {
+                BigDecimal due = (BigDecimal) i.get("amount_due");
+                BigDecimal paid = (BigDecimal) i.get("amount_paid");
+                lines.add(i.get("installment_number") + " | " + i.get("due_date") + " | S/ " + due + " | S/ " + paid + " | S/ " + due.subtract(paid == null ? BigDecimal.ZERO : paid).max(BigDecimal.ZERO) + " | " + i.get("status"));
+            });
+            return simplePdf(lines.toArray(String[]::new));
+        }).switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Préstamo no encontrado")));
     }
 
     @GetMapping(value="/reports/portfolio.pdf", produces=MediaType.APPLICATION_PDF_VALUE)
@@ -307,11 +380,14 @@ public class LendixApiController {
 
     public record CustomerRequest(String fullName, String dni, String phone, String email, String address, String notes) {}
     public record LoanRequest(UUID customerId, BigDecimal principal, BigDecimal interestRate, String ratePeriod, Integer termCount, String paymentFrequency, LocalDate disbursementDate, LocalDate firstDueDate, String notes, String requestId) {}
+    public record LoanEditRequest(BigDecimal principal, BigDecimal interestRate, Integer termCount, String paymentFrequency, LocalDate firstDueDate, String notes) {}
     public record PaymentRequest(BigDecimal amount, LocalDate paidAt, String paymentMethod, String notes, UUID installmentId, String requestId) {}
     public record ReversePaymentRequest(String reason) {}
     public record ExtensionRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
     public record RenewalRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
     public record CashRequest(String movementType, BigDecimal amount, String source, UUID referenceId, String notes) {}
     public record NotificationRequest(String recipient, String message, UUID referenceId) {}
+    public record CapitalContributionRequest(String contributor, BigDecimal amount, LocalDate contributionDate, String notes) {}
+    public record CapitalReturnRequest(BigDecimal amount, String notes) {}
 }
 
