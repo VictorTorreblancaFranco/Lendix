@@ -2121,15 +2121,20 @@ export class AppComponent {
     const loan = this.selectedLoan();
     if (!loan) return;
     Swal.fire({
-      title: "Editar frecuencia",
-      input: "select",
-      inputOptions: {
-        WEEKLY: "Semanal",
-        MONTHLY: "Mensual",
-        DAILY: "Diaria",
-        BIWEEKLY: "Quincenal",
+      title: "Editar préstamo",
+      html:
+        '<select id="edit-frequency" class="swal2-select"><option value="WEEKLY">Semanal</option><option value="MONTHLY">Mensual</option><option value="DAILY">Diaria</option><option value="BIWEEKLY">Quincenal</option></select><select id="edit-rate-period" class="swal2-select"><option value="MONTHLY">Tasa por período</option><option value="TOTAL">30% total del préstamo</option></select>',
+      didOpen: () => {
+        (document.getElementById("edit-frequency") as HTMLSelectElement).value =
+          loan.payment_frequency || "MONTHLY";
+        (document.getElementById("edit-rate-period") as HTMLSelectElement).value =
+          loan.rate_period || "MONTHLY";
       },
-      inputValue: loan.payment_frequency || "MONTHLY",
+      preConfirm: () => ({
+        frequency: (document.getElementById("edit-frequency") as HTMLSelectElement).value,
+        ratePeriod: (document.getElementById("edit-rate-period") as HTMLSelectElement).value,
+      }),
+      showConfirmButton: true,
       showCancelButton: true,
       confirmButtonText: "Guardar",
       cancelButtonText: "Cancelar",
@@ -2143,8 +2148,9 @@ export class AppComponent {
       const payload = {
         principal: Number(loan.principal),
         interestRate: Number(loan.interest_rate || 30),
+        ratePeriod: result.value.ratePeriod,
         termCount: Number(loan.term_count || 1),
-        paymentFrequency: result.value,
+        paymentFrequency: result.value.frequency,
         firstDueDate:
           loan.first_due_date || new Date().toISOString().slice(0, 10),
       };

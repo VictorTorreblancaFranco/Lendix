@@ -125,14 +125,16 @@ public class LendixApiController {
             return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Los datos del préstamo no son válidos"));
         String frequency = r.paymentFrequency() == null ? "MONTHLY" : r.paymentFrequency().toUpperCase();
         BigDecimal factor = switch (frequency) { case "WEEKLY" -> BigDecimal.valueOf(0.25); case "BIWEEKLY" -> BigDecimal.valueOf(0.5); case "DAILY" -> BigDecimal.ONE.divide(BigDecimal.valueOf(30), 6, java.math.RoundingMode.HALF_UP); default -> BigDecimal.ONE; };
-        BigDecimal interest = r.principal().multiply(r.interestRate()).divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP).multiply(factor).setScale(2, java.math.RoundingMode.HALF_UP);
-        BigDecimal total = r.principal().add(interest.multiply(BigDecimal.valueOf(r.termCount())));
+        String ratePeriod = r.ratePeriod() == null ? "MONTHLY" : r.ratePeriod();
+        BigDecimal totalInterest = r.principal().multiply(r.interestRate()).divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP);
+        BigDecimal interest = "TOTAL".equalsIgnoreCase(ratePeriod) ? totalInterest.divide(BigDecimal.valueOf(r.termCount()), 2, java.math.RoundingMode.HALF_UP) : totalInterest.multiply(factor).setScale(2, java.math.RoundingMode.HALF_UP);
+        BigDecimal total = r.principal().add("TOTAL".equalsIgnoreCase(ratePeriod) ? totalInterest : interest.multiply(BigDecimal.valueOf(r.termCount())));
         Mono<Map<String,Object>> flow = db.sql("SELECT id FROM loans WHERE id=:id AND status IN ('ACTIVE','OVERDUE')").bind("id", id).fetch().one()
                 .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "El préstamo no existe o ya está cerrado")))
                 .flatMap(existing -> db.sql("SELECT COUNT(*) AS paid FROM installments WHERE loan_id=:id AND amount_paid>0").bind("id", id).fetch().one()
                         .flatMap(count -> ((Number) count.get("paid")).longValue() > 0
                                 ? Mono.<Map<String,Object>>error(new ResponseStatusException(HttpStatus.CONFLICT, "No se puede editar un préstamo que ya tiene pagos"))
-                                : db.sql("UPDATE loans SET principal=:principal,interest_rate=:rate,term_count=:terms,payment_frequency=:frequency,first_due_date=:firstDue,total_due=:total,outstanding_principal=:principal,notes=:notes,updated_at=now(),version=version+1 WHERE id=:id").bind("principal", r.principal()).bind("rate", r.interestRate()).bind("terms", r.termCount()).bind("frequency", frequency).bind("firstDue", r.firstDueDate()).bind("total", total).bind("notes", r.notes() == null ? "" : r.notes()).bind("id", id).fetch().rowsUpdated().then(db.sql("DELETE FROM installments WHERE loan_id=:id").bind("id", id).fetch().rowsUpdated()).then(createInstallments(Map.of("id", id), new LoanRequest(null, r.principal(), r.interestRate(), "MONTHLY", r.termCount(), frequency, null, r.firstDueDate(), r.notes(), null), interest)).then(db.sql("SELECT l.id,c.full_name,l.principal,l.interest_rate,l.term_count,l.payment_frequency,l.total_due,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id", id).fetch().one())));
+                                : db.sql("UPDATE loans SET principal=:principal,interest_rate=:rate,rate_period=:period,term_count=:terms,payment_frequency=:frequency,first_due_date=:firstDue,total_due=:total,outstanding_principal=:principal,notes=:notes,updated_at=now(),version=version+1 WHERE id=:id").bind("principal", r.principal()).bind("rate", r.interestRate()).bind("period", ratePeriod).bind("terms", r.termCount()).bind("frequency", frequency).bind("firstDue", r.firstDueDate()).bind("total", total).bind("notes", r.notes() == null ? "" : r.notes()).bind("id", id).fetch().rowsUpdated().then(db.sql("DELETE FROM installments WHERE loan_id=:id").bind("id", id).fetch().rowsUpdated()).then(createInstallments(Map.of("id", id), new LoanRequest(null, r.principal(), r.interestRate(), ratePeriod, r.termCount(), frequency, null, r.firstDueDate(), r.notes(), null), interest)).then(db.sql("SELECT l.id,c.full_name,l.principal,l.interest_rate,l.rate_period,l.term_count,l.payment_frequency,l.total_due,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id", id).fetch().one())));
         return tx.transactional(flow);
     }
 
@@ -423,7 +425,7 @@ public class LendixApiController {
 
     public record CustomerRequest(String fullName, String dni, String phone, String email, String address, String notes) {}
     public record LoanRequest(UUID customerId, BigDecimal principal, BigDecimal interestRate, String ratePeriod, Integer termCount, String paymentFrequency, LocalDate disbursementDate, LocalDate firstDueDate, String notes, String requestId) {}
-    public record LoanEditRequest(BigDecimal principal, BigDecimal interestRate, Integer termCount, String paymentFrequency, LocalDate firstDueDate, String notes) {}
+    public record LoanEditRequest(BigDecimal principal, BigDecimal interestRate, String ratePeriod, Integer termCount, String paymentFrequency, LocalDate firstDueDate, String notes) {}
     public record PaymentRequest(BigDecimal amount, LocalDate paidAt, String paymentMethod, String notes, UUID installmentId, String requestId) {}
     public record PaymentDateRequest(LocalDate paidAt) {}
     public record ReversePaymentRequest(String reason) {}
