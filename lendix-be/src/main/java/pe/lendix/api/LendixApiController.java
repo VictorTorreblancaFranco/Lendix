@@ -113,8 +113,19 @@ public class LendixApiController {
     private Mono<Void> createInstallments(Map<String,Object> loan, LoanRequest r, BigDecimal interest) {
         BigDecimal principalPart = r.principal().divide(BigDecimal.valueOf(r.termCount()), 2, java.math.RoundingMode.HALF_UP);
         BigDecimal interestPart = interest;
-        return Flux.range(1, r.termCount()).concatMap(n -> db.sql("INSERT INTO installments(loan_id,installment_number,due_date,principal_due,interest_due,amount_due) VALUES(:loan,:n,:due,:principal,:interest,:amount)")
-                .bind("loan", loan.get("id")).bind("n", n).bind("due", dueDate(r.firstDueDate(), r.paymentFrequency(), n - 1)).bind("principal", principalPart).bind("interest", interestPart).bind("amount", principalPart.add(interestPart)).fetch().rowsUpdated()).then();
+        boolean roundedTotal = "TOTAL".equalsIgnoreCase(r.ratePeriod());
+        BigDecimal totalInterestForSchedule = roundedTotal ? interest.multiply(BigDecimal.valueOf(r.termCount())) : interest;
+        BigDecimal roundedPrincipal = r.principal().divide(BigDecimal.valueOf(r.termCount()), 0, java.math.RoundingMode.DOWN);
+        BigDecimal roundedInterest = totalInterestForSchedule.divide(BigDecimal.valueOf(r.termCount()), 0, java.math.RoundingMode.DOWN);
+        BigDecimal principalRemainder = r.principal().subtract(roundedPrincipal.multiply(BigDecimal.valueOf(r.termCount())));
+        BigDecimal interestRemainder = totalInterestForSchedule.subtract(roundedInterest.multiply(BigDecimal.valueOf(r.termCount())));
+        return Flux.range(1, r.termCount()).concatMap(n -> {
+            BigDecimal installmentPrincipal = roundedTotal ? roundedPrincipal.add(n == r.termCount() ? principalRemainder : BigDecimal.ZERO) : principalPart;
+            BigDecimal installmentInterest = roundedTotal ? roundedInterest.add(n == r.termCount() ? interestRemainder : BigDecimal.ZERO) : interestPart;
+            BigDecimal amount = installmentPrincipal.add(installmentInterest);
+            return db.sql("INSERT INTO installments(loan_id,installment_number,due_date,principal_due,interest_due,amount_due) VALUES(:loan,:n,:due,:principal,:interest,:amount)")
+                    .bind("loan", loan.get("id")).bind("n", n).bind("due", dueDate(r.firstDueDate(), r.paymentFrequency(), n - 1)).bind("principal", installmentPrincipal).bind("interest", installmentInterest).bind("amount", amount).fetch().rowsUpdated();
+        }).then();
     }
     private long periodDays(String frequency) { return switch (frequency == null ? "MONTHLY" : frequency.toUpperCase()) { case "DAILY" -> 1; case "WEEKLY" -> 7; case "BIWEEKLY" -> 14; default -> 30; }; }
     private LocalDate dueDate(LocalDate first, String frequency, int offset) { return switch (frequency == null ? "MONTHLY" : frequency.toUpperCase()) { case "DAILY" -> first.plusDays(offset); case "WEEKLY" -> first.plusWeeks(offset); case "BIWEEKLY" -> first.plusWeeks(offset * 2L); default -> first.plusMonths(offset); }; }
