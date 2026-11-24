@@ -95,9 +95,10 @@ public class LendixApiController {
         String frequency = r.paymentFrequency() == null ? "MONTHLY" : r.paymentFrequency();
         LocalDate disbursement = r.disbursementDate() == null ? LocalDate.now() : r.disbursementDate();
         if (r.firstDueDate() == null) return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Indica la primera fecha de pago"));
+        BigDecimal totalInterest = r.principal().multiply(r.interestRate()).divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP);
         BigDecimal periodFactor = switch (frequency.toUpperCase()) { case "WEEKLY" -> BigDecimal.valueOf(0.25); case "BIWEEKLY" -> BigDecimal.valueOf(0.5); case "DAILY" -> BigDecimal.ONE.divide(BigDecimal.valueOf(30), 6, java.math.RoundingMode.HALF_UP); default -> BigDecimal.ONE; };
-        BigDecimal interest = r.principal().multiply(r.interestRate()).divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP).multiply(periodFactor).setScale(2, java.math.RoundingMode.HALF_UP);
-        BigDecimal total = r.principal().add(interest.multiply(BigDecimal.valueOf(r.termCount())));
+        BigDecimal interest = "TOTAL".equalsIgnoreCase(ratePeriod) ? totalInterest.divide(BigDecimal.valueOf(r.termCount()), 2, java.math.RoundingMode.HALF_UP) : totalInterest.multiply(periodFactor).setScale(2, java.math.RoundingMode.HALF_UP);
+        BigDecimal total = r.principal().add("TOTAL".equalsIgnoreCase(ratePeriod) ? totalInterest : interest.multiply(BigDecimal.valueOf(r.termCount())));
         String requestKey = r.requestId() == null || r.requestId().isBlank() ? UUID.randomUUID().toString() : r.requestId();
         return db.sql("SELECT * FROM loans WHERE idempotency_key=:key").bind("key", requestKey).fetch().one()
                 .switchIfEmpty(db.sql("INSERT INTO loans(customer_id,principal,interest_rate,rate_period,term_count,payment_frequency,disbursement_date,first_due_date,total_due,outstanding_principal,notes,idempotency_key) VALUES(:customer,:principal,:rate,:period,:terms,:frequency,:disbursement,:firstDue,:total,:principal,:notes,:key) RETURNING *")
@@ -150,6 +151,23 @@ public class LendixApiController {
 
     @GetMapping("/customers/{id}/payments")
     public Flux<Map<String,Object>> customerPayments(@PathVariable UUID id) { return allPayments(id.toString()); }
+
+    @PutMapping("/payments/{id}/date")
+    public Mono<Map<String,Object>> correctPaymentDate(@PathVariable UUID id, @RequestBody PaymentDateRequest request) {
+        if (request.paidAt() == null) {
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Indica la fecha efectiva del pago"));
+        }
+        Mono<Map<String,Object>> flow = db.sql("SELECT id,paid_at FROM payments WHERE id=:id AND reversed_at IS NULL FOR UPDATE")
+                .bind("id", id).fetch().one()
+                .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "El pago no existe o ya fue revertido")))
+                .flatMap(previous -> db.sql("UPDATE payments SET paid_at=:paidAt WHERE id=:id RETURNING id,paid_at")
+                        .bind("paidAt", request.paidAt()).bind("id", id).fetch().one()
+                        .flatMap(updated -> db.sql("INSERT INTO audit_log(action,entity_type,entity_id,details) VALUES('UPDATE','PAYMENT',:id,:details)")
+                                .bind("id", id)
+                                .bind("details", "Fecha corregida de " + previous.get("paid_at") + " a " + request.paidAt())
+                                .fetch().rowsUpdated().thenReturn(updated)));
+        return tx.transactional(flow);
+    }
 
     @PostMapping("/payments/{id}/reverse")
     public Mono<Map<String,Object>> reversePayment(@PathVariable UUID id, @RequestBody ReversePaymentRequest request) {
@@ -407,6 +425,7 @@ public class LendixApiController {
     public record LoanRequest(UUID customerId, BigDecimal principal, BigDecimal interestRate, String ratePeriod, Integer termCount, String paymentFrequency, LocalDate disbursementDate, LocalDate firstDueDate, String notes, String requestId) {}
     public record LoanEditRequest(BigDecimal principal, BigDecimal interestRate, Integer termCount, String paymentFrequency, LocalDate firstDueDate, String notes) {}
     public record PaymentRequest(BigDecimal amount, LocalDate paidAt, String paymentMethod, String notes, UUID installmentId, String requestId) {}
+    public record PaymentDateRequest(LocalDate paidAt) {}
     public record ReversePaymentRequest(String reason) {}
     public record ExtensionRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
     public record RenewalRequest(LocalDate newDueDate, BigDecimal charge, String notes) {}
