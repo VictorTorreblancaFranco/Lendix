@@ -493,6 +493,14 @@ import { FormBuilder, ReactiveFormsModule, Validators } from "@angular/forms";
                       ><button
                         type="button"
                         class="icon-action report-action"
+                        data-tooltip="Aumentar capital"
+                        aria-label="Aumentar capital"
+                        (click)="increasePrincipal()"
+                      >
+                        ＋</button
+                      ><button
+                        type="button"
+                        class="icon-action report-action"
                         data-tooltip="Descargar cronograma PDF"
                         aria-label="Descargar cronograma PDF"
                         (click)="downloadSchedulePdf()"
@@ -2175,6 +2183,48 @@ export class AppComponent {
               "Solo se pueden editar préstamos sin pagos registrados.",
             "error",
           ),
+      });
+    });
+  }
+  increasePrincipal() {
+    const loan = this.selectedLoan();
+    if (!loan) return;
+    Swal.fire({
+      title: "Aumentar capital",
+      html:
+        `<p style="text-align:left;margin:0 20px 8px">Capital actual: <b>${this.money(loan.principal)}</b></p><p style="text-align:left;margin:0 20px 12px;color:#667085">El aumento se sumará al préstamo y se recalcularán las cuotas pendientes conservando los pagos ya registrados.</p><input id="increase-principal" class="swal2-input" type="number" min="1" step="1" placeholder="Monto adicional" />`,
+      showCancelButton: true,
+      confirmButtonText: "Recalcular préstamo",
+      cancelButtonText: "Cancelar",
+      preConfirm: () => {
+        const value = Number((document.getElementById("increase-principal") as HTMLInputElement).value);
+        if (!Number.isInteger(value) || value <= 0) {
+          Swal.showValidationMessage("Ingresa un monto entero mayor que 0");
+          return false;
+        }
+        return { amount: value };
+      },
+    }).then((result) => {
+      if (!result.isConfirmed) return;
+      Swal.fire({
+        title: "Recalculando préstamo",
+        text: "Actualizando capital, intereses y cuotas pendientes...",
+        allowOutsideClick: false,
+        didOpen: () => Swal.showLoading(),
+      });
+      this.http.post<any>(`/api/v1/loans/${loan.id}/increase-principal`, result.value).subscribe({
+        next: (updated) => {
+          this.selectedLoan.set(updated);
+          this.openLoan(updated);
+          this.load();
+          Swal.fire({
+            icon: "success",
+            title: "Capital aumentado",
+            text: `Nuevo capital: ${this.money(updated.principal)} · Total programado: ${this.money(updated.total_due)}`,
+            confirmButtonText: "Entendido",
+          });
+        },
+        error: (e) => Swal.fire("No se pudo aumentar", e?.error?.message || "No se pudo recalcular el préstamo.", "error"),
       });
     });
   }

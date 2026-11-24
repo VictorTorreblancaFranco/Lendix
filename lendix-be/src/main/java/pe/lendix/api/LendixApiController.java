@@ -149,6 +149,63 @@ public class LendixApiController {
         return tx.transactional(flow);
     }
 
+    @PostMapping("/loans/{id}/increase-principal")
+    public Mono<Map<String,Object>> increasePrincipal(@PathVariable UUID id, @RequestBody IncreasePrincipalRequest r) {
+        if (r.amount() == null || r.amount().signum() <= 0 || r.amount().stripTrailingZeros().scale() > 0)
+            return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "El aumento debe ser un monto entero positivo"));
+
+        Mono<Map<String,Object>> flow = db.sql("SELECT * FROM loans WHERE id=:id AND status IN ('ACTIVE','OVERDUE') FOR UPDATE")
+                .bind("id", id).fetch().one()
+                .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "El préstamo no existe o ya está cerrado")))
+                .flatMap(loan -> db.sql("SELECT * FROM installments WHERE loan_id=:id ORDER BY installment_number FOR UPDATE")
+                        .bind("id", id).fetch().all().collectList()
+                        .flatMap(items -> {
+                            if (items.isEmpty()) return Mono.error(new ResponseStatusException(HttpStatus.CONFLICT, "El préstamo no tiene cronograma"));
+                            BigDecimal oldPrincipal = (BigDecimal) loan.get("principal");
+                            BigDecimal newPrincipal = oldPrincipal.add(r.amount());
+                            BigDecimal rate = (BigDecimal) loan.get("interest_rate");
+                            Integer terms = ((Number) loan.get("term_count")).intValue();
+                            String frequency = String.valueOf(loan.get("payment_frequency"));
+                            String ratePeriod = String.valueOf(loan.get("rate_period"));
+                            BigDecimal totalInterest = newPrincipal.multiply(rate).divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP);
+                            BigDecimal factor = switch (frequency.toUpperCase()) { case "WEEKLY" -> BigDecimal.valueOf(0.25); case "BIWEEKLY" -> BigDecimal.valueOf(0.5); case "DAILY" -> BigDecimal.ONE.divide(BigDecimal.valueOf(30), 6, java.math.RoundingMode.HALF_UP); default -> BigDecimal.ONE; };
+                            BigDecimal newTotal = newPrincipal.add("TOTAL".equalsIgnoreCase(ratePeriod) ? totalInterest : totalInterest.multiply(factor).setScale(2, java.math.RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(terms)));
+                            BigDecimal totalPaid = items.stream().map(i -> (BigDecimal) i.get("amount_paid")).reduce(BigDecimal.ZERO, BigDecimal::add);
+                            BigDecimal principalPaid = items.stream().map(i -> (BigDecimal) i.get("principal_paid")).reduce(BigDecimal.ZERO, BigDecimal::add);
+                            BigDecimal newOutstandingPrincipal = ((BigDecimal) loan.get("outstanding_principal")).add(r.amount());
+                            BigDecimal remainingPrincipal = newOutstandingPrincipal.max(BigDecimal.ZERO);
+                            BigDecimal remainingTotal = newTotal.subtract(totalPaid).max(BigDecimal.ZERO);
+                            BigDecimal remainingInterest = remainingTotal.subtract(remainingPrincipal).max(BigDecimal.ZERO);
+                            List<Map<String,Object>> pending = items.stream().filter(i -> !"PAID".equals(String.valueOf(i.get("status")))).toList();
+                            if (pending.isEmpty()) return Mono.error(new ResponseStatusException(HttpStatus.CONFLICT, "El préstamo no tiene cuotas pendientes"));
+                            return db.sql("UPDATE loans SET principal=:principal,total_due=:total,outstanding_principal=:outstanding,updated_at=now(),version=version+1 WHERE id=:id")
+                                    .bind("principal", newPrincipal).bind("total", newTotal).bind("outstanding", newOutstandingPrincipal).bind("id", id).fetch().rowsUpdated()
+                                    .then(recalculatePendingInstallments(pending, remainingPrincipal, remainingInterest, remainingTotal))
+                                    .then(db.sql("INSERT INTO audit_log(action,entity_type,entity_id,details) VALUES('UPDATE','LOAN',:id,:details)").bind("id", id).bind("details", "Capital aumentado en S/ " + r.amount() + "; nuevo capital S/ " + newPrincipal).fetch().rowsUpdated())
+                                    .then(db.sql("SELECT l.id,c.full_name,l.principal,l.interest_rate,l.rate_period,l.term_count,l.payment_frequency,l.first_due_date,l.total_due,l.outstanding_principal,l.status FROM loans l JOIN customers c ON c.id=l.customer_id WHERE l.id=:id").bind("id", id).fetch().one());
+                        }));
+        return tx.transactional(flow);
+    }
+
+    private Mono<Void> recalculatePendingInstallments(List<Map<String,Object>> pending, BigDecimal principal, BigDecimal interest, BigDecimal total) {
+        int count = pending.size();
+        BigDecimal principalBase = principal.divide(BigDecimal.valueOf(count), 0, java.math.RoundingMode.DOWN);
+        BigDecimal interestBase = interest.divide(BigDecimal.valueOf(count), 0, java.math.RoundingMode.DOWN);
+        BigDecimal totalBase = total.divide(BigDecimal.valueOf(count), 0, java.math.RoundingMode.DOWN);
+        BigDecimal principalRemainder = principal.subtract(principalBase.multiply(BigDecimal.valueOf(count)));
+        BigDecimal interestRemainder = interest.subtract(interestBase.multiply(BigDecimal.valueOf(count)));
+        BigDecimal totalRemainder = total.subtract(totalBase.multiply(BigDecimal.valueOf(count)));
+        return Flux.range(0, count).concatMap(index -> {
+            Map<String,Object> item = pending.get(index);
+            boolean last = index == count - 1;
+            BigDecimal principalDue = ((BigDecimal) item.get("principal_paid")).add(principalBase).add(last ? principalRemainder : BigDecimal.ZERO);
+            BigDecimal interestDue = ((BigDecimal) item.get("interest_paid")).add(interestBase).add(last ? interestRemainder : BigDecimal.ZERO);
+            BigDecimal amountDue = ((BigDecimal) item.get("amount_paid")).add(totalBase).add(last ? totalRemainder : BigDecimal.ZERO);
+            return db.sql("UPDATE installments SET principal_due=:principal,interest_due=:interest,amount_due=:amount,status=CASE WHEN amount_paid>=:amount THEN 'PAID' WHEN amount_paid>0 THEN 'PARTIAL' ELSE 'PENDING' END WHERE id=:id")
+                    .bind("principal", principalDue).bind("interest", interestDue).bind("amount", amountDue).bind("id", item.get("id")).fetch().rowsUpdated();
+        }).then();
+    }
+
     @GetMapping("/loans/{id}/installments")
     public Flux<Map<String,Object>> installments(@PathVariable UUID id) { return db.sql("SELECT * FROM installments WHERE loan_id=:id ORDER BY installment_number").bind("id", id).fetch().all(); }
 
@@ -437,6 +494,7 @@ public class LendixApiController {
     public record CustomerRequest(String fullName, String dni, String phone, String email, String address, String notes) {}
     public record LoanRequest(UUID customerId, BigDecimal principal, BigDecimal interestRate, String ratePeriod, Integer termCount, String paymentFrequency, LocalDate disbursementDate, LocalDate firstDueDate, String notes, String requestId) {}
     public record LoanEditRequest(BigDecimal principal, BigDecimal interestRate, String ratePeriod, Integer termCount, String paymentFrequency, LocalDate firstDueDate, String notes) {}
+    public record IncreasePrincipalRequest(BigDecimal amount) {}
     public record PaymentRequest(BigDecimal amount, LocalDate paidAt, String paymentMethod, String notes, UUID installmentId, String requestId) {}
     public record PaymentDateRequest(LocalDate paidAt) {}
     public record ReversePaymentRequest(String reason) {}
