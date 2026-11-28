@@ -82,7 +82,11 @@ public class LendixApiController {
 
     @GetMapping("/loans")
     public Flux<Map<String,Object>> loans(@RequestParam(defaultValue = "") String status) {
-        String sql = "SELECT l.id,l.customer_id,c.full_name,c.dni,l.principal,l.interest_rate,l.rate_period,l.term_count,l.payment_frequency,l.disbursement_date,l.first_due_date,l.status,l.total_due,l.outstanding_principal FROM loans l JOIN customers c ON c.id=l.customer_id " + (status.isBlank() ? "" : "WHERE l.status=:status ") + "ORDER BY l.created_at DESC";
+        String sql = "SELECT l.id,l.customer_id,c.full_name,c.dni,l.principal,l.interest_rate,l.rate_period,l.term_count,l.payment_frequency,l.disbursement_date,l.first_due_date,l.status,l.total_due,l.outstanding_principal, "
+                + "(SELECT i.due_date FROM installments i WHERE i.loan_id=l.id AND i.status <> 'PAID' ORDER BY i.installment_number LIMIT 1) AS next_due_date, "
+                + "(SELECT i.installment_number FROM installments i WHERE i.loan_id=l.id AND i.status <> 'PAID' ORDER BY i.installment_number LIMIT 1) AS next_installment_number, "
+                + "(SELECT (i.amount_due - i.amount_paid) FROM installments i WHERE i.loan_id=l.id AND i.status <> 'PAID' ORDER BY i.installment_number LIMIT 1) AS next_payment_amount "
+                + "FROM loans l JOIN customers c ON c.id=l.customer_id " + (status.isBlank() ? "" : "WHERE l.status=:status ") + "ORDER BY l.created_at DESC";
         var spec = db.sql(sql); if (!status.isBlank()) spec = spec.bind("status", status); return spec.fetch().all();
     }
 

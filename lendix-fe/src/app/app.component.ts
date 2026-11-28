@@ -595,19 +595,22 @@ import { FormBuilder, ReactiveFormsModule, Validators } from "@angular/forms";
                 </section>
                 <h2>Cartera de préstamos</h2>
                 <p>{{ loans().length }} operaciones registradas</p>
-                <div class="table">
-                  <div class="row head">
+                <div class="table loan-table">
+                  <div class="row head" style="grid-template-columns:minmax(210px,1.7fr) minmax(95px,.9fr) minmax(95px,.9fr) minmax(170px,1.35fr) minmax(55px,.55fr) minmax(90px,.8fr)">
                     <span>Cliente</span><span>Capital</span><span>Saldo</span
-                    ><span>Estado</span>
+                    ><span>Próximo pago</span><span>Cuota</span><span>Estado</span>
                   </div>
                   <div
                     class="row loan-row"
+                    style="grid-template-columns:minmax(210px,1.7fr) minmax(95px,.9fr) minmax(95px,.9fr) minmax(170px,1.35fr) minmax(55px,.55fr) minmax(90px,.8fr)"
                     *ngFor="let l of loans()"
                     (click)="openLoan(l)"
                   >
                     <span>{{ l.full_name }}</span
                     ><span>{{ money(l.principal) }}</span
                     ><span>{{ money(l.outstanding_principal) }}</span
+                    ><span>{{ l.next_due_date ? (l.next_due_date + " · " + money(l.next_payment_amount)) : "Sin cuotas" }}</span
+                    ><span>{{ l.next_installment_number ? ("#" + l.next_installment_number) : "—" }}</span
                     ><span class="status">{{ l.status }}</span>
                   </div>
                   <p *ngIf="!loans().length">
